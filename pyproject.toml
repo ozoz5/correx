@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pseudo-intelligence-core"
+version = "0.1.0"
+description = "AI Correction OS — persistent human correction memory that makes AI learn from feedback"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Pseudo Intelligence Project"},
+]
+keywords = [
+    "ai", "correction", "memory", "mcp", "llm",
+    "preference-learning", "feedback-loop", "lora",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/pseudo-intelligence/core"
+Documentation = "https://github.com/pseudo-intelligence/core#readme"
+Repository = "https://github.com/pseudo-intelligence/core"
+
+[project.scripts]
+pseudo-intelligence = "claude_pseudo_intelligence.mcp_server:main"
+
+[project.optional-dependencies]
+mcp = ["mcp[cli]>=1.9.4,<2"]
+train = ["mlx-lm[train]"]
+full = ["mcp[cli]>=1.9.4,<2", "mlx-lm[train]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

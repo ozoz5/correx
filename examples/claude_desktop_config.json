@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "pseudo-intelligence": {
+      "command": "python3",
+      "args": [
+        "-m",
+        "claude_pseudo_intelligence",
+        "--memory-dir",
+        "~/.pseudo-intelligence",
+        "--transport",
+        "stdio"
+      ]
+    }
+  }
+}

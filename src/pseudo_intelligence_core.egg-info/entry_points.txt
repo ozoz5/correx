@@ -1,0 +1,2 @@
+[console_scripts]
+pseudo-intelligence = claude_pseudo_intelligence.mcp_server:main

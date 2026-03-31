@@ -1,0 +1,229 @@
+Metadata-Version: 2.4
+Name: pseudo-intelligence-core
+Version: 0.1.0
+Summary: AI Correction OS — persistent human correction memory that makes AI learn from feedback
+Author: Pseudo Intelligence Project
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/pseudo-intelligence/core
+Project-URL: Documentation, https://github.com/pseudo-intelligence/core#readme
+Project-URL: Repository, https://github.com/pseudo-intelligence/core
+Keywords: ai,correction,memory,mcp,llm,preference-learning,feedback-loop,lora
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Provides-Extra: mcp
+Requires-Dist: mcp[cli]<2,>=1.9.4; extra == "mcp"
+Provides-Extra: train
+Requires-Dist: mlx-lm[train]; extra == "train"
+Provides-Extra: full
+Requires-Dist: mcp[cli]<2,>=1.9.4; extra == "full"
+Requires-Dist: mlx-lm[train]; extra == "full"
+Dynamic: license-file
+
+# Correx
+
+**AI Correction OS** — Persistent human correction memory that makes AI learn from feedback.
+
+Every time a human corrects AI output, the correction is captured, generalized into reusable rules, and automatically injected into future generations. The AI stops making the same mistake twice.
+
+## How It Works
+
+```
+Human corrects AI output
+       |
+       v
+save_conversation_turn()  -->  ConversationTurn stored
+       |
+       |  extract corrections
+       v
+PreferenceRule (candidate)     reaction_score (0.0-1.0)
+       |
+       |  evidence_count >= 2
+       v
+PreferenceRule (PROMOTED)
+       |
+       |  next task starts
+       v
+build_guidance_context()  -->  Guidance injected into prompt
+       |
+       v
+AI generates better output
+       |
+       |  measure improvement
+       v
+record_growth()  -->  baseline vs guided delta
+```
+
+## Quick Start
+
+```bash
+pip install pseudo-intelligence-core[mcp]
+pseudo-intelligence --transport stdio
+```
+
+Or with Python:
+
+```bash
+pip install pseudo-intelligence-core
+python -m claude_pseudo_intelligence
+```
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `build_guidance_context` | Retrieve relevant past corrections for a new task |
+| `save_episode` | Save a completed task outcome |
+| `save_correction` | Record a human override on an episode |
+| `save_conversation_turn` | Log conversation feedback (triggers rule promotion) |
+| `save_training_example` | Mark accepted output as supervised training data |
+| `list_entries` | Browse episode history |
+| `list_conversation_turns` | Browse conversation turn history |
+| `list_preference_rules` | List promoted and candidate rules |
+| `record_growth` | Record baseline vs guided quality measurement |
+| `get_growth_summary` | Overall growth statistics and trend |
+| `get_growth_trend` | Score history for a specific case |
+| `export_training_dataset` | Generate MLX-LM compatible JSONL files |
+| `run_auto_training_cycle` | Export dataset + trigger LoRA training |
+
+## MCP Resources
+
+| URI | Description |
+|-----|-------------|
+| `memory://summary` | Overview of all memory state |
+| `memory://entries/{limit}` | Recent episode summaries |
+| `memory://guidance/{task_scope}` | Relevant corrections for a scope |
+
+## Configuration
+
+### Claude Code
+
+```bash
+claude mcp add pseudo-intelligence \
+  -s user \
+  -- python3 -m claude_pseudo_intelligence \
+  --memory-dir ~/.pseudo-intelligence \
+  --transport stdio
+```
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pseudo-intelligence": {
+      "command": "python3",
+      "args": [
+        "-m", "claude_pseudo_intelligence",
+        "--memory-dir", "~/.pseudo-intelligence",
+        "--transport", "stdio"
+      ]
+    }
+  }
+}
+```
+
+### HTTP Transport
+
+```bash
+pseudo-intelligence \
+  --memory-dir ~/.pseudo-intelligence \
+  --transport streamable-http \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --path /mcp
+```
+
+## Architecture
+
+```
+src/claude_pseudo_intelligence/
+  service.py              # Main facade — single entry point
+  mcp_server.py           # FastMCP server (13 tools, 3 resources)
+  history_store.py        # JSON-based persistent storage
+  schemas.py              # Core dataclasses (5 types)
+  learning_context.py     # Correction retrieval & scoring
+  conversation_learning.py # Text normalization, rule extraction
+  reaction_scorer.py      # Rule-based feedback scoring
+  growth_tracker.py       # Before/after measurement
+  training_dataset.py     # JSONL export for mlx-lm
+  auto_train.py           # MLX-LM LoRA training orchestration
+  secret_store.py         # macOS Keychain integration
+```
+
+### Storage
+
+All data is stored as JSON files in the memory directory (default: `~/.pseudo-intelligence/`):
+
+- `history.json` — Episode records (max 50)
+- `conversation_history.json` — Conversation turns (max 200)
+- `preference_rules.json` — Promoted and candidate rules (max 100)
+- `growth/` — Growth measurement records
+
+### Rule Promotion
+
+Corrections are extracted from user feedback using pattern matching. When the same correction appears in 2+ conversation turns, it is promoted from `candidate` to `promoted` status and included in future guidance context.
+
+## Training Pipeline
+
+Export accepted outputs as supervised training data:
+
+```bash
+pseudo-intelligence-export \
+  --memory-dir ~/.pseudo-intelligence \
+  --output-dir ./training_data
+```
+
+Output: `train.jsonl`, `valid.jsonl`, `test.jsonl`, `preference.jsonl`, `manifest.json`
+
+Auto-train with MLX-LM LoRA:
+
+```bash
+pip install pseudo-intelligence-core[train]
+pseudo-intelligence-train \
+  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
+  --memory-dir ~/.pseudo-intelligence \
+  --output-dir ./training_artifacts
+```
+
+## Python API
+
+```python
+from claude_pseudo_intelligence.service import PseudoIntelligenceService
+
+svc = PseudoIntelligenceService(memory_dir="~/.pseudo-intelligence")
+
+# Get guidance for a new task
+guidance = svc.build_guidance_context(
+    task_title="Design landing page",
+    raw_text="Create a B2B service top page",
+)
+
+# Save conversation feedback
+svc.save_conversation_turn(
+    task_scope="ui_design",
+    user_message="Design the top page",
+    assistant_message="Here is a content-heavy design...",
+    user_feedback="Too much content. Add whitespace.",
+)
+
+# Check promoted rules
+rules = svc.list_preference_rules(promoted_only=True)
+```
+
+## License
+
+MIT
+
+---
+
+[Japanese documentation](docs/README_ja.md)

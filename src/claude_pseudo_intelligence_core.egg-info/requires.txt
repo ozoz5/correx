@@ -1,0 +1,10 @@
+
+[full]
+mcp[cli]<2,>=1.9.4
+mlx-lm[train]
+
+[mcp]
+mcp[cli]<2,>=1.9.4
+
+[train]
+mlx-lm[train]

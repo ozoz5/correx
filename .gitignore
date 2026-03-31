@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+/.local-memory/*.json
+/training_artifacts/
