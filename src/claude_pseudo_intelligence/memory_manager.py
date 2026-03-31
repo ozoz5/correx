@@ -400,17 +400,22 @@ def derive_rule_status(
     confidence_score: float = 0.0,
     min_promoted_evidence: int = 2,
 ) -> str:
-    """Keep compatibility with candidate/promoted while using contextual confidence."""
-    if strong_signal_count >= 1 and context_mode == "local" and expected_gain >= 1.4:
+    """Keep compatibility with candidate/promoted while using contextual confidence.
+
+    Thresholds relaxed 2026-03-31 to break the circular dependency where
+    candidate rules never accumulate success signals because they were never
+    injected as guidance (which required promoted status).
+    """
+    if strong_signal_count >= 1 and context_mode == "local" and expected_gain >= 0.8:
         return "promoted"
-    if confidence_score >= 0.6 and expected_gain >= 2.2 and evidence_count >= 2:
+    if confidence_score >= 0.5 and expected_gain >= 1.0 and evidence_count >= 2:
         return "promoted"
-    if support_score >= 3.2 and expected_gain >= 1.8 and evidence_count >= 2:
+    if support_score >= 2.0 and expected_gain >= 1.0 and evidence_count >= 2:
         return "promoted"
     required_evidence = max(min_promoted_evidence, 3 if context_mode == "general" else 2)
-    if evidence_count >= required_evidence and support_score >= 3.0:
+    if evidence_count >= required_evidence and support_score >= 2.0:
         return "promoted"
-    if evidence_count >= required_evidence and support_score >= 2.0 and expected_gain >= 1.5:
+    if evidence_count >= required_evidence and support_score >= 1.5 and expected_gain >= 0.8:
         return "promoted"
     return "candidate"
 
