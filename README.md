@@ -66,12 +66,14 @@ Engram also builds a **personality profile**:
 ### Install
 
 ```bash
-git clone https://github.com/your-username/correx
+git clone https://github.com/ozoz5/correx
 cd correx
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[mcp]"
 ```
+
+> **Naming note:** The repo is `correx`. The Python package is `claude_pseudo_intelligence` and the MCP server registers as `pseudo-intelligence`. These names reflect the project's history and will converge in a future release.
 
 ### Add to Claude Code
 
@@ -145,14 +147,8 @@ save_conversation_turn(
 
 ## Dashboard
 
-CORREX includes a visual dashboard.
-
-```bash
-cd dashboard
-npm install
-npm run dev
-# → http://localhost:3000
-```
+A visual dashboard companion exists as a separate project (Next.js).
+It is not included in this repository.
 
 The overview shows a **living plant** that grows as your AI learns:
 
@@ -161,6 +157,8 @@ The overview shows a **living plant** that grows as your AI learns:
 - Fruits → principles
 
 The plant grows slowly. Like your AI.
+
+> Dashboard open-source release: planned.
 
 ---
 
@@ -171,12 +169,12 @@ correx/
   src/claude_pseudo_intelligence/
     mcp_server.py          # MCP tool definitions
     service.py             # Core service layer
-    history_store.py       # Persistence + rule promotion
+    history_store.py       # Persistence + I/O orchestration
+    rule_builder.py        # Pure rule construction logic (no I/O)
     memory_manager.py      # Conflict resolution, self-correction
     meaning_synthesis.py   # Engram: rules → meanings → principles
     personality_layer.py   # Behavioral profiling
     llm_scorer.py          # Reaction scoring (Anthropic API / rule-based fallback)
-  dashboard/               # Next.js visual interface
   tests/                   # 90 tests passing
 ```
 
