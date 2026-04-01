@@ -7,11 +7,11 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from correx import ChatLoopAdapter, PseudoIntelligenceService
+from correx import ChatLoopAdapter, CorrexService
 from correx.mcp_server import _memory_summary
 
 
-class PseudoIntelligenceServiceTest(unittest.TestCase):
+class CorrexServiceTest(unittest.TestCase):
     def test_chat_loop_adapter_runs_prepare_feedback_accept(self):
         with TemporaryDirectory() as temp_dir:
             adapter = ChatLoopAdapter(Path(temp_dir) / "memory")
@@ -288,7 +288,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_rebuild_context_transitions_infers_flow_from_legacy_turns(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir) / "memory")
+            service = CorrexService(Path(temp_dir) / "memory")
             service.save_conversation_turn(
                 task_scope="proposal_summary",
                 user_message="提案書の要約を書け",
@@ -324,7 +324,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_guidance_dedupes_same_correction_case(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
             for _ in range(2):
                 entry = service.save_episode(
                     title="自治体システム再構築業務",
@@ -351,7 +351,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
     def test_memory_summary_counts_training_examples(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            service = PseudoIntelligenceService(temp_path / "memory")
+            service = CorrexService(temp_path / "memory")
             entry = service.save_episode(title="summary-demo", output={"answer": "ok"})
             service.save_training_example(entry.id, system_message="sys", user_message="user")
             service.save_conversation_turn(
@@ -370,7 +370,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_authoritative_tags_override_auto_extracted_noise(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir) / "memory")
+            service = CorrexService(Path(temp_dir) / "memory")
             turn = service.save_conversation_turn(
                 task_scope="memory_architecture",
                 user_message="昇格ではなく価値は状況依存だ",
@@ -387,7 +387,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_rebuild_preference_rules_skips_stop_reminder_noise(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir) / "memory")
+            service = CorrexService(Path(temp_dir) / "memory")
             service.save_conversation_turn(
                 task_scope="auto_captured",
                 user_message="<task-notification>completed</task-notification>",
@@ -410,7 +410,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
     def test_export_training_dataset_from_accepted_example(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            service = PseudoIntelligenceService(temp_path / "memory")
+            service = CorrexService(temp_path / "memory")
             entry = service.save_episode(
                 title="自治体システム再構築業務",
                 issuer="東京都",
@@ -459,7 +459,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
     def test_chronological_split_holds_out_newest_examples(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            service = PseudoIntelligenceService(temp_path / "memory")
+            service = CorrexService(temp_path / "memory")
             accepted_outputs: list[str] = []
             for index in range(5):
                 entry = service.save_episode(
@@ -509,7 +509,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
     def test_auto_training_cycle_dry_run_builds_mlx_command(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
-            service = PseudoIntelligenceService(temp_path / "memory")
+            service = CorrexService(temp_path / "memory")
 
             for index in range(2):
                 entry = service.save_episode(
@@ -592,7 +592,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_save_episode_keeps_history_for_same_task_identity(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
             first_entry = service.save_episode(
                 title="自治体システム再構築業務",
                 issuer="東京都",
@@ -617,7 +617,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_save_episode_and_reuse_correction(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
             entry = service.save_episode(
                 title="自治体システム再構築業務",
                 issuer="東京都",
@@ -647,7 +647,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_conversation_corrections_promote_preference_rules(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
 
             first_turn = service.save_conversation_turn(
                 task_scope="service design",
@@ -685,7 +685,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_local_rule_does_not_leak_into_unrelated_scope(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
             service.save_conversation_turn(
                 task_scope="proposal_summary",
                 user_message="提案書を要約して",
@@ -713,7 +713,7 @@ class PseudoIntelligenceServiceTest(unittest.TestCase):
 
     def test_rule_spanning_multiple_scopes_becomes_general(self):
         with TemporaryDirectory() as temp_dir:
-            service = PseudoIntelligenceService(Path(temp_dir))
+            service = CorrexService(Path(temp_dir))
             service.save_conversation_turn(
                 task_scope="proposal_summary",
                 user_feedback="ROI数値を入れろ。",

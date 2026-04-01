@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from correx import PseudoIntelligenceService
+from correx import CorrexService
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,7 +23,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    service = PseudoIntelligenceService(args.memory_dir)
+    service = CorrexService(args.memory_dir)
     report = service.export_training_dataset(
         args.output_dir,
         valid_ratio=args.valid_ratio,

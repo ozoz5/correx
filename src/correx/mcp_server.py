@@ -8,13 +8,13 @@ from typing import Any
 
 from .chat_adapter import ChatLoopAdapter
 from .mlx_trainer import MlxLoraTrainingConfig
-from .service import PseudoIntelligenceService
+from .service import CorrexService
 
 SERVER_NAME = "correx"
 SERVER_INSTRUCTIONS = (
     "Use this server when you need persistent human correction memory, "
     "conversation-derived preference rules, training dataset export, or automatic "
-    "LoRA training orchestration for the Claude Pseudo Intelligence Core."
+    "LoRA training orchestration for the Correx AI Correction OS."
 )
 
 
@@ -133,7 +133,7 @@ def _summarize_transition(transition: Any) -> dict[str, Any]:
     }
 
 
-def _memory_summary(service: PseudoIntelligenceService) -> dict[str, Any]:
+def _memory_summary(service: CorrexService) -> dict[str, Any]:
     entries = service.list_entries()
     turns = service.list_conversation_turns()
     rules = service.list_preference_rules()
@@ -150,13 +150,13 @@ def _memory_summary(service: PseudoIntelligenceService) -> dict[str, Any]:
         for entry in entries
         if getattr(getattr(entry, "training_example", None), "accepted", False)
     ]
+    personality = service.history.load_personality()
     return {
         "memory_dir": str(service.base_dir),
         "entry_count": len(entries),
         "conversation_turn_count": len(turns),
         "preference_rule_count": len(rules),
-        "stable_rule_count": len(stable_rules),
-        "promoted_rule_count": len([r for r in rules if getattr(r, "status", "") == "promoted"]),
+        "promoted_rule_count": len(stable_rules),
         "high_value_rule_count": len(high_value_rules),
         "general_rule_count": len(general_rules),
         "mixed_rule_count": len(mixed_rules),
@@ -166,8 +166,8 @@ def _memory_summary(service: PseudoIntelligenceService) -> dict[str, Any]:
         "meaning_count": len(meanings),
         "cross_scope_meanings": len([m for m in meanings if m.cross_scope_count >= 2]),
         "accepted_training_example_count": len(trainable_entries),
-        "personality_metabolism": service.history.load_personality().get("metabolism_label", "unknown"),
-        "personality_digestibility": service.history.load_personality().get("digestibility_label", "unknown"),
+        "personality_metabolism": personality.get("metabolism_label", "unknown"),
+        "personality_digestibility": personality.get("digestibility_label", "unknown"),
         "latest_entries": [_summarize_entry(entry) for entry in entries[:5]],
         "latest_preference_rules": [_summarize_rule(rule) for rule in rules[:5]],
         "latest_context_transitions": [_summarize_transition(item) for item in transitions[:5]],
@@ -183,7 +183,7 @@ def create_mcp_server(
 ) -> Any:
     Context, FastMCP = _require_fastmcp()
     globals()["Context"] = Context
-    service = PseudoIntelligenceService(memory_dir)
+    service = CorrexService(memory_dir)
     chat_adapter = ChatLoopAdapter(memory_dir)
 
     mcp = FastMCP(
@@ -392,6 +392,23 @@ def create_mcp_server(
             "ok": True,
             "count": len(transitions),
             "items": [_summarize_transition(item) for item in transitions[:10]],
+            "memory_summary": _memory_summary(service),
+        }
+
+    @mcp.tool()
+    def rebuild_preference_rules() -> dict[str, Any]:
+        """Rebuild preference rules from all stored conversation turns.
+
+        Re-scans the full correction history and promotes patterns that have
+        appeared consistently across sessions into preference rules. Run this
+        after importing corrections in bulk, or to repair a degraded rule set.
+        """
+        rules = service.rebuild_preference_rules()
+        promoted = [r for r in rules if getattr(r, "status", "") == "promoted"]
+        return {
+            "ok": True,
+            "total": len(rules),
+            "promoted": len(promoted),
             "memory_summary": _memory_summary(service),
         }
 
@@ -888,7 +905,7 @@ def create_mcp_server(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Claude Pseudo Intelligence Core MCP server.")
+    parser = argparse.ArgumentParser(description="Run the Correx MCP server.")
     parser.add_argument("--memory-dir", default=str(Path.cwd() / ".local-memory"))
     parser.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio")
     parser.add_argument("--host", default="127.0.0.1")

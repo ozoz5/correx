@@ -9,7 +9,7 @@ from tempfile import NamedTemporaryFile
 from typing import Any, TextIO
 from uuid import uuid4
 
-from .service import PseudoIntelligenceService
+from .service import CorrexService
 
 try:
     import fcntl
@@ -147,7 +147,7 @@ class ChatLoopAdapter:
     def __init__(self, memory_dir: str | Path):
         self.memory_dir = Path(memory_dir)
         self.memory_dir.mkdir(parents=True, exist_ok=True)
-        self.service = PseudoIntelligenceService(self.memory_dir)
+        self.service = CorrexService(self.memory_dir)
         self.session_dir = self.memory_dir / "chat_sessions"
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.lock_file = self.memory_dir / ".chat-session.lock"

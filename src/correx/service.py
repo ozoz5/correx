@@ -37,7 +37,7 @@ from .secret_store import delete_secure_secret, get_secure_secret, set_secure_se
 from .training_dataset import export_mlx_lm_dataset
 
 
-class PseudoIntelligenceService:
+class CorrexService:
     def __init__(
         self,
         base_dir: str | Path,

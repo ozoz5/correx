@@ -11,7 +11,7 @@ from .schemas import (
     RuleContext,
     TrainingExample,
 )
-from .service import PseudoIntelligenceService
+from .service import CorrexService
 
 __all__ = [
     "ConversationTurn",
@@ -24,7 +24,7 @@ __all__ = [
     "LatentContext",
     "LlmScorer",
     "PreferenceRule",
-    "PseudoIntelligenceService",
+    "CorrexService",
     "RuleContext",
     "TrainingExample",
     "apply_forgetting_curve",
