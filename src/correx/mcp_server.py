@@ -240,11 +240,14 @@ def create_mcp_server(
             limit=limit,
             task_scope=task_scope,
         )
+        ghost_principles = service.get_fired_ghost_principles()
         return {
             "guidance_context": guidance,
             "task_title": task_title,
             "issuer": issuer,
             "task_scope": task_scope,
+            "ghost_principles_count": len(ghost_principles),
+            "ghost_principles": ghost_principles,
         }
 
     @mcp.tool()
@@ -683,6 +686,7 @@ def create_mcp_server(
         extracted_corrections: list[str] | None = None,
         tags: list[str] | None = None,
         guidance_applied: bool = False,
+        ghost_option: str = "",
         metadata: dict | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
@@ -692,6 +696,12 @@ def create_mcp_server(
         before generating assistant_message. This enables automatic growth measurement:
         turns without guidance become the baseline; turns with guidance show improvement.
         Reaction score is inferred automatically — no explicit scoring needed.
+
+        ghost_option: Optional. If the AI proposed something that was rejected or
+        corrected, pass the rejected proposal text here. It will be stored as a
+        ghost memory for the autonomous learning layer (GhostEngine). Over time,
+        related ghosts cluster into trajectories that fire and sublimate into
+        autonomous principles — without further human correction.
         """
         turn = service.save_conversation_turn(
             task_scope=task_scope,
@@ -706,13 +716,39 @@ def create_mcp_server(
         )
         if ctx is not None:
             await ctx.info(f"Saved conversation turn {turn.id} in scope {turn.task_scope or 'generic'} | reaction_score={turn.reaction_score}")
-        return {
+
+        result: dict[str, Any] = {
             "ok": True,
             "turn": _to_plain_data(turn),
             "reaction_score": turn.reaction_score,
             "guidance_applied": turn.guidance_applied,
             "memory_summary": _memory_summary(service),
         }
+
+        # Optionally record the rejected proposal as a ghost
+        if ghost_option:
+            ghost_dict, trajectory_dict, fired_principles = service.save_ghost(
+                rejected_output=ghost_option,
+                task_scope=task_scope,
+                tags=tags,
+                user_feedback=user_feedback,
+                accepted_output=assistant_message,
+                source_turn_id=turn.id,
+            )
+            result["ghost"] = {
+                "ghost_id": ghost_dict["id"],
+                "origin": ghost_dict["origin"],
+                "prediction_error": ghost_dict["prediction_error"],
+                "trajectory_id": trajectory_dict["id"],
+                "trajectory_cumulative_pe": trajectory_dict["cumulative_pe"],
+                "trajectory_ghost_count": trajectory_dict["source_ghost_count"],
+                "fired": bool(fired_principles),
+                "fired_principles": fired_principles,
+            }
+            if ctx is not None and fired_principles:
+                await ctx.info(f"Ghost trajectory fired! Autonomous principle extracted: {fired_principles[0][:80]}")
+
+        return result
 
     @mcp.tool()
     async def save_training_example(
@@ -899,6 +935,284 @@ def create_mcp_server(
         return {
             "ok": True,
             "report": report,
+        }
+
+    # ------------------------------------------------------------------
+    # Ghost Engine tools
+    # ------------------------------------------------------------------
+
+    @mcp.tool()
+    async def save_ghost(
+        rejected_output: str,
+        task_scope: str = "",
+        tags: list[str] | None = None,
+        user_feedback: str = "",
+        accepted_output: str = "",
+        source_turn_id: str = "",
+        ctx: Context | None = None,
+    ) -> dict[str, Any]:
+        """Record a rejected AI proposal as a ghost memory for autonomous learning.
+
+        Call this when the AI proposed something that was rejected or corrected.
+        The ghost captures the rejected output, computes prediction error against
+        the actual user response, and assigns it to an interference trajectory.
+
+        When a trajectory accumulates enough prediction error (ghosts > 2 and
+        cumulative PE > threshold), it fires automatically and sublimates into
+        an autonomous principle — without requiring further human correction.
+
+        Parameters:
+          rejected_output: The AI's proposal that was rejected or corrected.
+          task_scope: The task scope (same as save_conversation_turn).
+          tags: Relevant tags for clustering.
+          user_feedback: What the user actually said (the correction/rejection).
+          accepted_output: The output that was actually accepted (if known).
+          source_turn_id: The ConversationTurn ID that created this ghost.
+        """
+        ghost_dict, trajectory_dict, fired_principles = service.save_ghost(
+            rejected_output=rejected_output,
+            task_scope=task_scope,
+            tags=tags,
+            user_feedback=user_feedback,
+            accepted_output=accepted_output,
+            source_turn_id=source_turn_id,
+        )
+        fired = bool(fired_principles)
+        if ctx is not None:
+            status = f"fired! principles extracted: {len(fired_principles)}" if fired else "queued in trajectory"
+            await ctx.info(f"Ghost {ghost_dict['id'][:8]} saved — trajectory {trajectory_dict['id'][:8]} — {status}")
+        return {
+            "ok": True,
+            "ghost_id": ghost_dict["id"],
+            "origin": ghost_dict["origin"],
+            "prediction_error": ghost_dict["prediction_error"],
+            "interference": ghost_dict["interference"],
+            "trajectory_id": trajectory_dict["id"],
+            "trajectory_cumulative_pe": trajectory_dict["cumulative_pe"],
+            "trajectory_ghost_count": trajectory_dict["source_ghost_count"],
+            "fired": fired,
+            "fired_principles": fired_principles,
+        }
+
+    @mcp.tool()
+    def list_ghost_trajectories(
+        include_fired: bool = True,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List ghost trajectories — interference patterns detected from rejected proposals.
+
+        Each trajectory is a cluster of related rejections converging on the same
+        interference theme. When cumulative prediction error crosses the threshold,
+        the trajectory fires and sublimates into an autonomous principle.
+
+        Parameters:
+          include_fired: Whether to include already-fired trajectories.
+          limit: Maximum number of trajectories to return.
+        """
+        trajectories = service.list_ghost_trajectories(
+            include_fired=include_fired,
+            limit=limit,
+        )
+        fired = [t for t in trajectories if t.get("fired")]
+        open_t = [t for t in trajectories if not t.get("fired")]
+        return {
+            "ok": True,
+            "total": len(trajectories),
+            "fired_count": len(fired),
+            "open_count": len(open_t),
+            "trajectories": trajectories,
+        }
+
+    @mcp.tool()
+    def get_ghost_principles() -> dict[str, Any]:
+        """Get all autonomous principles sublimated from fired ghost trajectories.
+
+        These principles were extracted without human correction — purely from
+        the accumulated prediction errors of rejected AI proposals. They represent
+        the deepest layer of the Engram engine: patterns the AI kept getting wrong
+        until the ghost trajectory fired and distilled the lesson autonomously.
+
+        Include these alongside guidance from build_guidance_context for maximum
+        behavioral alignment.
+        """
+        principles = service.get_fired_ghost_principles()
+        return {
+            "ok": True,
+            "count": len(principles),
+            "ghost_principles": principles,
+            "note": (
+                "These principles were extracted autonomously from fired ghost trajectories. "
+                "No human correction was needed to generate them."
+            ) if principles else (
+                "No ghost trajectories have fired yet. "
+                "Ghost principles emerge after enough rejected proposals accumulate "
+                "in the same interference trajectory."
+            ),
+        }
+
+    @mcp.tool()
+    def ingest_claude_sessions(
+        projects_dir: str = "",
+        include_positive: bool = True,
+    ) -> dict[str, Any]:
+        """Ingest past Claude Code sessions into the correction/ghost pipeline.
+
+        Scans ~/.claude/projects/ for all session JSONL files, extracts
+        user→assistant pairs where corrections or praise occurred, and
+        feeds them into conversation_history (for rule promotion) and
+        ghost engine (for trajectory analysis).
+
+        Call this once to bootstrap the system with historical data.
+        Set include_positive=True to also capture praise patterns.
+
+        Args:
+            projects_dir: Override path to Claude projects dir. Default: ~/.claude/projects/
+            include_positive: Also extract positive feedback ("いいね", "完璧" etc.)
+        """
+        import re
+        import hashlib
+        from datetime import datetime
+
+        base = Path(projects_dir) if projects_dir else Path.home() / ".claude" / "projects"
+        if not base.exists():
+            return {"ok": False, "error": f"Directory not found: {base}"}
+
+        neg_words = re.compile(
+            r"違う|そうじゃない|やり直|ダメ|だめ|雑|抽象|具体|ちがう|余計|不要|いらん|やめ|捨て"
+            r"|するな|じゃない|直せ|バグ|嘘|ひどい|おかしい|冗談|忘れるな|使うな|待つな|逃げるな"
+            r"|なんで|できてない|動かない|壊れ|間違|やめろ|変えろ|効かない|聞いてない"
+        )
+        pos_words = re.compile(
+            r"いいね|いいよ|完璧|素晴らしい|最高|ありがとう|感動|正解|それでいい|それだ"
+            r"|good|great|perfect|exactly|nice|awesome|love it|well done"
+        )
+
+        def _infer_scope(name: str) -> str:
+            n = name.lower()
+            if "疑似知性" in name or "-----" in n: return "correx_development"
+            if "document" in n: return "document_creation"
+            if "ecrc" in n: return "ecrc_project"
+            if "antigravity" in n: return "game_development"
+            return "general"
+
+        # Load existing to avoid duplicates
+        existing_turns = service.history.load_conversation_turns()
+        existing_ids = {t.get("id", "") for t in existing_turns}
+        # Also track by original_id in metadata to prevent duplicates on re-run
+        existing_ids.update(
+            t.get("metadata", {}).get("original_id", "")
+            for t in existing_turns
+            if t.get("metadata", {}).get("source") == "ingest_claude_sessions"
+        )
+
+        new_corrections = 0
+        new_positives = 0
+        new_ghosts = 0
+        projects_scanned = 0
+
+        for proj in base.iterdir():
+            if not proj.is_dir():
+                continue
+            projects_scanned += 1
+            scope = _infer_scope(proj.name)
+
+            for sf in sorted(proj.glob("*.jsonl")):
+                messages: list[dict] = []
+                _MAX_MESSAGES_PER_FILE = 5000
+                for line in sf.open():
+                    try:
+                        d = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    msg = d.get("message", {})
+                    role = msg.get("role", "")
+                    if not role:
+                        continue
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        texts = [c.get("text", "") for c in content
+                                 if c.get("type") == "text" and c.get("text")]
+                        text = "\n".join(texts)
+                    elif isinstance(content, str):
+                        text = content
+                    else:
+                        text = ""
+                    ts = d.get("timestamp", "")
+                    if text.strip():
+                        messages.append({"role": role, "text": text.strip(), "ts": ts})
+                        if len(messages) >= _MAX_MESSAGES_PER_FILE:
+                            break
+
+                for i in range(len(messages) - 1):
+                    if messages[i]["role"] != "user":
+                        continue
+                    user_text = messages[i]["text"]
+                    if len(user_text) < 6 or user_text.startswith("{"):
+                        continue
+
+                    is_negative = bool(neg_words.search(user_text))
+                    is_positive = bool(pos_words.search(user_text)) if include_positive else False
+
+                    if not is_negative and not is_positive:
+                        continue
+
+                    # Find next assistant response
+                    asst_text = ""
+                    for j in range(i + 1, min(i + 3, len(messages))):
+                        if messages[j]["role"] == "assistant" and messages[j]["text"]:
+                            asst_text = messages[j]["text"]
+                            break
+                    if not asst_text:
+                        continue
+
+                    turn_id = hashlib.sha256(
+                        f"ingest-{messages[i]['ts']}-{user_text[:50]}".encode()
+                    ).hexdigest()[:20]
+                    if turn_id in existing_ids:
+                        continue
+                    existing_ids.add(turn_id)
+
+                    score = 0.25 if is_negative else 0.85
+                    tags = [scope, "ingested"]
+                    if is_positive:
+                        tags.append("positive")
+
+                    # Save as conversation turn via service
+                    service.save_conversation_turn(
+                        task_scope=scope,
+                        user_message=user_text[:400],
+                        assistant_message=asst_text[:300],
+                        user_feedback=user_text[:400],
+                        extracted_corrections=[],
+                        tags=tags,
+                        guidance_applied=False,
+                        metadata={"source": "ingest_claude_sessions", "original_id": turn_id},
+                    )
+
+                    if is_negative:
+                        new_corrections += 1
+                        # Also create ghost
+                        try:
+                            service.save_ghost(
+                                rejected_output=asst_text[:500],
+                                task_scope=scope,
+                                tags=tags[:3],
+                                user_feedback=user_text[:500],
+                                source_turn_id=turn_id,
+                            )
+                            new_ghosts += 1
+                        except Exception:
+                            pass
+                    else:
+                        new_positives += 1
+
+        return {
+            "ok": True,
+            "projects_scanned": projects_scanned,
+            "new_corrections": new_corrections,
+            "new_positives": new_positives,
+            "new_ghosts": new_ghosts,
+            "total_turns_now": len(existing_ids),
         }
 
     return mcp

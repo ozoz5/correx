@@ -32,6 +32,14 @@ from .personality_layer import (
     format_personality_guidance,
 )
 from .schemas import Meaning, Principle
+from .ghost_engine import (
+    create_ghost,
+    ghost_from_dict,
+    ghost_to_dict,
+    process_ghost,
+    trajectory_from_dict,
+    trajectory_to_dict,
+)
 from .mlx_trainer import MlxLoraTrainingConfig
 from .secret_store import delete_secure_secret, get_secure_secret, set_secure_secret
 from .training_dataset import export_mlx_lm_dataset
@@ -435,6 +443,11 @@ class CorrexService:
         if personality_section:
             sections.append(personality_section)
 
+        # Ghost layer: sublimated principles from rejected proposals
+        ghost_section = self._build_ghost_guidance()
+        if ghost_section:
+            sections.append(ghost_section)
+
         return "\n\n".join(section for section in sections if section)
 
     # ------------------------------------------------------------------
@@ -492,6 +505,101 @@ class CorrexService:
         if profile.sample_size < 5:
             return ""
         return format_personality_guidance(profile, interventions)
+
+    def _build_ghost_guidance(self) -> str:
+        """Build guidance from Ghost Engine: universal laws + sublimated principles.
+
+        Universal laws are the highest-level behavioral principles, distilled
+        from hundreds of rejections via Claude Sonnet. They take precedence
+        over individual sublimated principles.
+        """
+        import json as _json
+
+        sections: list[str] = []
+
+        has_laws = False
+        has_positive = False
+
+        # 1. Universal laws (constraints)
+        laws_path = self.history.base_dir / "ghost_universal_laws.json"
+        if laws_path.exists():
+            try:
+                laws = _json.loads(laws_path.read_text(encoding="utf-8"))
+                if laws:
+                    law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
+                    for i, law in enumerate(laws, 1):
+                        law_lines.append(f"  {i}. {law['law']}")
+                    sections.append("\n".join(law_lines))
+                    has_laws = True
+            except (ValueError, OSError, KeyError, UnicodeDecodeError):
+                pass
+
+        # 2. Positive laws (drivers)
+        pos_path = self.history.base_dir / "ghost_positive_laws.json"
+        if pos_path.exists():
+            try:
+                pos_laws = _json.loads(pos_path.read_text(encoding="utf-8"))
+                if pos_laws:
+                    pos_lines = ["[推奨法理 — 肯定反応から抽出された推進基準]"]
+                    for i, law in enumerate(pos_laws, 1):
+                        pos_lines.append(f"  +{i}. {law['law']}")
+                    sections.append("\n".join(pos_lines))
+                    has_positive = True
+            except (ValueError, OSError, KeyError, UnicodeDecodeError):
+                pass
+
+        # 3. Tension resolution instruction
+        if has_laws and has_positive:
+            sections.append(
+                "[適用ルール]\n"
+                "禁止法理と推奨法理は矛盾ではなく、状況依存のテンションである。\n"
+                "両方を同時に意識し、現在の場面でどちらに重みがあるかを判断せよ。\n"
+                "一般に: タスク開始時・未知領域では禁止法理を重視、\n"
+                "方向確定後・既知領域では推奨法理を重視せよ。\n"
+                "どちらか一方だけを適用して他方を無視するな。"
+            )
+
+        # 4. Individual sublimated principles — specifics coexist with laws
+        # Laws are the umbrella for unknown situations.
+        # Specific principles are zero-judgment instant-apply rules for known situations.
+        # Both must coexist. Do not suppress specifics just because laws exist.
+        # But we filter for quality and cap to avoid flooding context.
+        principles = self.get_fired_ghost_principles()
+        if principles:
+            # Clean up: remove format artifacts from 7b generation
+            cleaned = []
+            seen = set()
+            for p in principles:
+                # Strip common artifacts
+                p = p.strip()
+                for prefix in ["**汎用原則:**", "**汎用原則：**", "汎用原則:", "固有原則:"]:
+                    if p.startswith(prefix):
+                        p = p[len(prefix):].strip()
+                # Take first line only, strip quotes
+                p = p.split("\n")[0].strip().strip("「」\"'")
+                # Skip if too short, too long, or duplicate
+                if len(p) < 5 or len(p) > 80:
+                    continue
+                if p in seen:
+                    continue
+                seen.add(p)
+                cleaned.append(p)
+
+            if cleaned:
+                # Cap at 20 to balance specificity vs context usage
+                top = cleaned[:20]
+                p_lines = [
+                    "[固有原則 — 既知の場面で即適用する具体基準]",
+                    "法理は未知の場面で類推適用する傘。固有原則は既知の場面で判断不要で即適用する。",
+                    "両方が共存する。法理があるからといって固有原則を無視するな。",
+                ]
+                for i, p in enumerate(top, 1):
+                    p_lines.append(f"  {i}. {p}")
+                if len(cleaned) > 20:
+                    p_lines.append(f"  (他{len(cleaned) - 20}件の固有原則あり)")
+                sections.append("\n".join(p_lines))
+
+        return "\n\n".join(sections)
 
     # ------------------------------------------------------------------
     # Growth measurement
@@ -590,3 +698,86 @@ class CorrexService:
             training_config=training_config,
         )
         return report.to_dict()
+
+    # ------------------------------------------------------------------
+    # Ghost Engine
+    # ------------------------------------------------------------------
+
+    def save_ghost(
+        self,
+        *,
+        rejected_output: str,
+        task_scope: str = "",
+        tags: list[str] | None = None,
+        user_feedback: str = "",
+        accepted_output: str = "",
+        source_turn_id: str = "",
+    ) -> tuple[dict, dict, list[str]]:
+        """Create a ghost from a rejected AI proposal and process it through trajectories.
+
+        Returns:
+        - ghost_dict: the stored Ghost record
+        - trajectory_dict: the updated GhostTrajectory record
+        - fired_principles: list of sublimated principles (empty if not yet fired)
+        """
+        # Load personality for metabolism rate
+        personality = self.history.load_personality()
+        metabolism_rate = float(personality.get("metabolism_rate", 0.5))
+
+        # Create ghost
+        ghost = create_ghost(
+            rejected_output=rejected_output,
+            task_scope=task_scope,
+            tags=tags,
+            user_feedback=user_feedback,
+            accepted_output=accepted_output,
+            source_turn_id=source_turn_id,
+        )
+
+        # Load existing trajectories and ghosts
+        trajectory_dicts = self.history.load_ghost_trajectories()
+        ghost_dicts = self.history.load_ghosts()
+
+        trajectories = [trajectory_from_dict(d) for d in trajectory_dicts]
+        all_ghosts = {d["id"]: ghost_from_dict(d) for d in ghost_dicts}
+
+        # Process ghost through pipeline
+        updated_ghost, updated_trajectory, fired_principles = process_ghost(
+            ghost=ghost,
+            trajectories=trajectories,
+            all_ghosts=all_ghosts,
+            metabolism_rate=metabolism_rate,
+        )
+
+        # Persist
+        ghost_dict = ghost_to_dict(updated_ghost)
+        trajectory_dict = trajectory_to_dict(updated_trajectory)
+        self.history.save_ghost_with_trajectory(ghost_dict, trajectory_dict)
+
+        return ghost_dict, trajectory_dict, fired_principles
+
+    def list_ghosts(self, limit: int = 50) -> list[dict]:
+        """List stored ghosts, most recent first."""
+        ghosts = self.history.load_ghosts()
+        return ghosts[:limit]
+
+    def list_ghost_trajectories(
+        self,
+        *,
+        include_fired: bool = True,
+        limit: int = 20,
+    ) -> list[dict]:
+        """List ghost trajectories."""
+        trajectories = self.history.load_ghost_trajectories()
+        if not include_fired:
+            trajectories = [t for t in trajectories if not t.get("fired", False)]
+        return trajectories[:limit]
+
+    def get_fired_ghost_principles(self) -> list[str]:
+        """Get all sublimated principles from fired trajectories."""
+        trajectories = self.history.load_ghost_trajectories()
+        principles = []
+        for t in trajectories:
+            if t.get("fired") and t.get("sublimated_principle"):
+                principles.append(t["sublimated_principle"])
+        return principles

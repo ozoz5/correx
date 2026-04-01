@@ -176,6 +176,93 @@ class Principle:
 
 
 @dataclass(slots=True)
+class Ghost:
+    """A rejected AI proposal that persists as a counterfactual memory.
+
+    When the AI proposes something and the user rejects or corrects it,
+    the rejected option isn't discarded — it's stored as a ghost.
+    The ghost carries the AI's predicted outcome and, when the actual
+    outcome is later observed, the prediction error is computed.
+
+    Trajectories of connected ghosts (same interference theme) eventually
+    "fire" when cumulative prediction error crosses a threshold, triggering
+    sublimation into an unlanguaged principle that feeds back autonomously.
+    """
+    id: str
+    created_at: str
+
+    # The rejected proposal
+    rejected_output: str = ""          # what the AI proposed that was rejected
+
+    # The prediction at rejection time
+    predicted_outcome: str = ""        # AI's predicted user response (text)
+
+    # Hesitation signal (proxy for quantum interference)
+    # 0.0 = no hesitation, 1.0 = maximum hesitation
+    interference: float = 0.0
+
+    # Actual outcome (filled in when observed)
+    actual_outcome: str = ""           # observed user response
+    prediction_error: float = 0.0     # divergence between predicted and actual
+
+    # Origin classification — scolded has highest signal quality
+    # "rejected":  AI proposed, user chose differently (weak signal)
+    # "corrected": AI output needed explicit correction (medium signal)
+    # "scolded":   AI output caused frustration/anger (strongest signal)
+    origin: str = "rejected"
+
+    # Context
+    task_scope: str = ""
+    tags: list[str] = field(default_factory=list)
+    source_turn_id: str = ""           # which ConversationTurn created this
+
+    # Trajectory linkage (filled when assigned)
+    trajectory_id: str = ""
+
+
+@dataclass(slots=True)
+class GhostTrajectory:
+    """A sequence of related ghosts converging on the same interference theme.
+
+    Trajectories form by clustering ghosts that share a common topic of
+    conflict — the AI's tendency to misjudge the same thing repeatedly.
+
+    When cumulative prediction error crosses the firing threshold, the
+    trajectory fires. Firing triggers sublimation: extracting a principle
+    from the pattern of rejections without requiring further human correction.
+    This is the autonomous learning loop.
+    """
+    id: str
+    created_at: str
+    updated_at: str
+
+    # Inferred theme of this interference pattern
+    theme: str = ""
+
+    # Ghost IDs ordered by creation time
+    ghost_ids: list[str] = field(default_factory=list)
+
+    # Accumulated prediction error (drives toward firing threshold)
+    cumulative_pe: float = 0.0
+
+    # Adaptive threshold (starts at 1.0, adjusts with metabolism_rate)
+    firing_threshold: float = 1.0
+
+    # Firing state
+    fired: bool = False
+    fired_at: str = ""
+
+    # Sublimated principle (extracted autonomously when fired)
+    sublimated_principle: str = ""
+
+    # Metadata
+    source_ghost_count: int = 0
+    scopes: list[str] = field(default_factory=list)
+    origin_mix: dict = field(default_factory=dict)  # {"scolded": N, ...}
+    status: str = "open"  # "open" | "fired" | "exhausted"
+
+
+@dataclass(slots=True)
 class EpisodeRecord:
     id: str
     timestamp: str

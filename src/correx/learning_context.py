@@ -514,7 +514,10 @@ def build_conversation_guidance(
         previous_context_nodes=previous_context_nodes,
         transitions=transitions,
     )
-    selected_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False)][:rule_limit]
+    # Promoted rules always included (no cap). Candidates capped by rule_limit.
+    promoted_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") == "promoted"]
+    candidate_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") != "promoted"][:rule_limit]
+    selected_rules = promoted_rules + candidate_rules
     relevant_turns = get_relevant_conversation_corrections(
         turns,
         task_scope=task_scope,

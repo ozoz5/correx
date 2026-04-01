@@ -83,6 +83,8 @@ class HistoryStore:
         self.principles_file = self.base_dir / "principles.json"
         self.personality_file = self.base_dir / "personality.json"
         self.deferred_meanings_file = self.base_dir / "deferred_meanings.json"
+        self.ghosts_file = self.base_dir / "ghosts.json"
+        self.ghost_trajectories_file = self.base_dir / "ghost_trajectories.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -724,6 +726,73 @@ class HistoryStore:
         handle = self._lock_handle()
         try:
             self._write_preference_rules_unlocked(rules)
+        finally:
+            self._unlock_handle(handle)
+
+    # ------------------------------------------------------------------
+    # Ghost Engine persistence
+    # ------------------------------------------------------------------
+
+    def load_ghosts(self) -> list[dict]:
+        """Load all stored Ghost records as raw dicts."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.ghosts_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_ghosts(self, ghosts: list[dict]) -> None:
+        """Atomically write Ghost records."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.ghosts_file, ghosts)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_ghost_trajectories(self) -> list[dict]:
+        """Load all stored GhostTrajectory records as raw dicts."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.ghost_trajectories_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_ghost_trajectories(self, trajectories: list[dict]) -> None:
+        """Atomically write GhostTrajectory records."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.ghost_trajectories_file, trajectories)
+        finally:
+            self._unlock_handle(handle)
+
+    def save_ghost_with_trajectory(
+        self,
+        ghost_dict: dict,
+        trajectory_dict: dict,
+    ) -> None:
+        """Atomically save a ghost and its updated trajectory together."""
+        handle = self._lock_handle()
+        try:
+            # Ghosts
+            ghosts = self._read_json_list(self.ghosts_file)
+            existing_ids = {g.get("id") for g in ghosts}
+            if ghost_dict.get("id") not in existing_ids:
+                ghosts.insert(0, ghost_dict)
+            else:
+                ghosts = [ghost_dict if g.get("id") == ghost_dict.get("id") else g for g in ghosts]
+            self._atomic_write_json(self.ghosts_file, ghosts)
+
+            # Trajectories
+            trajectories = self._read_json_list(self.ghost_trajectories_file)
+            traj_ids = {t.get("id") for t in trajectories}
+            if trajectory_dict.get("id") not in traj_ids:
+                trajectories.insert(0, trajectory_dict)
+            else:
+                trajectories = [
+                    trajectory_dict if t.get("id") == trajectory_dict.get("id") else t
+                    for t in trajectories
+                ]
+            self._atomic_write_json(self.ghost_trajectories_file, trajectories)
         finally:
             self._unlock_handle(handle)
 
