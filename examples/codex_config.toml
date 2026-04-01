@@ -1,12 +1,12 @@
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
 
-[mcp_servers."pseudo-intelligence"]
+[mcp_servers."correx"]
 command = "/opt/homebrew/bin/python3"
 args = [
   "/path/to/correx/scripts/run_mcp_server.py",
   "--memory-dir",
-  "~/.pseudo-intelligence",
+  "~/.correx",
   "--transport",
   "stdio",
 ]

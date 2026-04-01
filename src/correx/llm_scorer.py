@@ -131,7 +131,7 @@ def _ollama_score(
             return _parse_float(data.get("response", ""))
     except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
         import sys
-        print(f"[pseudo-intelligence] Ollama scoring failed: {exc}", file=sys.stderr)
+        print(f"[correx] Ollama scoring failed: {exc}", file=sys.stderr)
         return None
 
 
@@ -161,7 +161,7 @@ def _mlx_score(
         from mlx_lm import generate, load  # type: ignore[import]
     except ImportError:
         import sys
-        print("[pseudo-intelligence] MLX scoring skipped: mlx_lm not installed", file=sys.stderr)
+        print("[correx] MLX scoring skipped: mlx_lm not installed", file=sys.stderr)
         return None
 
     if model not in _mlx_cache:
@@ -169,7 +169,7 @@ def _mlx_score(
             _mlx_cache[model] = load(model)
         except Exception as exc:
             import sys
-            print(f"[pseudo-intelligence] MLX model load failed: {exc}", file=sys.stderr)
+            print(f"[correx] MLX model load failed: {exc}", file=sys.stderr)
             return None
 
     mlx_model, tokenizer = _mlx_cache[model]
@@ -197,7 +197,7 @@ def _mlx_score(
         return _parse_float(response)
     except Exception as exc:
         import sys
-        print(f"[pseudo-intelligence] MLX scoring failed: {exc}", file=sys.stderr)
+        print(f"[correx] MLX scoring failed: {exc}", file=sys.stderr)
         return None
 
 
@@ -234,7 +234,7 @@ def _anthropic_score(
         return _parse_float(text)
     except Exception as exc:
         import sys
-        print(f"[pseudo-intelligence] Anthropic scoring failed: {exc}", file=sys.stderr)
+        print(f"[correx] Anthropic scoring failed: {exc}", file=sys.stderr)
         return None
 
 
@@ -350,7 +350,7 @@ class LlmScorer:
         if self.backend != "auto":
             self._resolved = self.backend
             import sys
-            print(f"[pseudo-intelligence] Scorer backend: {self._resolved} (explicit)", file=sys.stderr)
+            print(f"[correx] Scorer backend: {self._resolved} (explicit)", file=sys.stderr)
             return self._resolved
 
         import sys
@@ -358,14 +358,14 @@ class LlmScorer:
         # Try Anthropic API first (remote, most accurate, very cheap)
         if _anthropic_available():
             self._resolved = "anthropic"
-            print("[pseudo-intelligence] Scorer backend: anthropic (API)", file=sys.stderr)
+            print("[correx] Scorer backend: anthropic (API)", file=sys.stderr)
             return self._resolved
 
         # Rule-based is more accurate than small local models (1.5B)
         # for Japanese mixed-signal scoring. Use it as default.
         # Ollama/MLX are available for explicit backend selection.
         self._resolved = "rule"
-        print("[pseudo-intelligence] Scorer backend: rule (improved rule-based)", file=sys.stderr)
+        print("[correx] Scorer backend: rule (improved rule-based)", file=sys.stderr)
         return self._resolved
 
     def _cached_score(self, feedback: str, corrections_key: str) -> float:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from claude_pseudo_intelligence.memory_manager import (
+from correx.memory_manager import (
     apply_forgetting_curve,
     archive_turns_to_episode,
     auto_correct_flagged_rules,
@@ -23,7 +23,7 @@ from claude_pseudo_intelligence.memory_manager import (
     resolve_contradicting_rules,
     semantic_similarity,
 )
-from claude_pseudo_intelligence.schemas import (
+from correx.schemas import (
     ConversationTurn,
     EpisodeRecord,
     LatentContext,
@@ -60,7 +60,7 @@ def _make_episode(
     has_training: bool = False,
     issuer: str = "",
 ) -> EpisodeRecord:
-    from claude_pseudo_intelligence.schemas import CorrectionRecord
+    from correx.schemas import CorrectionRecord
 
     corrections = [
         CorrectionRecord(recorded_at="2026/03/28", correction_note=f"fix-{i}")
@@ -1229,7 +1229,7 @@ class PersonalityLayerTest(unittest.TestCase):
     """Tests for personality_layer.py: profile computation and interventions."""
 
     def test_empty_data_returns_defaults(self):
-        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        from correx.personality_layer import compute_personality_profile
         profile = compute_personality_profile([], [])
 
         self.assertEqual(profile.metabolism_rate, 0.5)
@@ -1238,7 +1238,7 @@ class PersonalityLayerTest(unittest.TestCase):
         self.assertEqual(profile.sample_size, 0)
 
     def test_high_demote_rate_signals_aggressive(self):
-        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        from correx.personality_layer import compute_personality_profile
         rules = [
             _make_rule(f"r{i}", f"rule {i}", status="demoted") for i in range(8)
         ] + [
@@ -1252,7 +1252,7 @@ class PersonalityLayerTest(unittest.TestCase):
         self.assertEqual(profile.metabolism_label, "aggressive")
 
     def test_stale_retention_detected(self):
-        from claude_pseudo_intelligence.personality_layer import compute_personality_profile, detect_interventions
+        from correx.personality_layer import compute_personality_profile, detect_interventions
         rule = _make_rule("r1", "余白を作れ", confidence_score=0.5)
         rule.failure_count = 5
         rule.success_count = 1
@@ -1264,7 +1264,7 @@ class PersonalityLayerTest(unittest.TestCase):
         self.assertEqual(len(stale), 1)
 
     def test_repeated_failure_detected(self):
-        from claude_pseudo_intelligence.personality_layer import compute_personality_profile, detect_interventions
+        from correx.personality_layer import compute_personality_profile, detect_interventions
         turns = [
             _make_turn(f"t{i}", task_scope="design", reaction_score=0.2) for i in range(5)
         ]
@@ -1277,7 +1277,7 @@ class PersonalityLayerTest(unittest.TestCase):
         self.assertIn("design", repeated[0].evidence)
 
     def test_goal_drift_detected(self):
-        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        from correx.personality_layer import compute_personality_profile
         turns = (
             [_make_turn(f"t{i}", task_scope="architecture") for i in range(5)] +
             [_make_turn(f"t{i+5}", task_scope="commercialization") for i in range(5)]
@@ -1288,7 +1288,7 @@ class PersonalityLayerTest(unittest.TestCase):
         self.assertTrue(profile.drift_detected)
 
     def test_format_adapts_to_digestibility(self):
-        from claude_pseudo_intelligence.personality_layer import (
+        from correx.personality_layer import (
             PersonalityProfile, InterventionSignal, format_personality_guidance,
         )
         sig = InterventionSignal(
@@ -1314,8 +1314,8 @@ class CreativeDestructionTest(unittest.TestCase):
     """Tests for apply_creative_destruction in meaning_synthesis.py."""
 
     def test_subsumed_rules_weakened(self):
-        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
-        from claude_pseudo_intelligence.schemas import Meaning
+        from correx.meaning_synthesis import apply_creative_destruction
+        from correx.schemas import Meaning
 
         r1 = _make_rule("r1", "余白を作れ", evidence_count=3)
         r1.priority = 4
@@ -1340,8 +1340,8 @@ class CreativeDestructionTest(unittest.TestCase):
         self.assertEqual(len(log), 1)
 
     def test_aggressive_metabolism_destroys_more(self):
-        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
-        from claude_pseudo_intelligence.schemas import Meaning
+        from correx.meaning_synthesis import apply_creative_destruction
+        from correx.schemas import Meaning
 
         r1 = _make_rule("r1", "余白を作れ", evidence_count=3)
         r1.priority = 4
@@ -1369,8 +1369,8 @@ class CreativeDestructionTest(unittest.TestCase):
         self.assertLessEqual(aggressive_priority, conservative_priority)
 
     def test_weak_meaning_no_destruction(self):
-        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
-        from claude_pseudo_intelligence.schemas import Meaning
+        from correx.meaning_synthesis import apply_creative_destruction
+        from correx.schemas import Meaning
 
         r1 = _make_rule("r1", "余白を作れ")
         r1.priority = 3

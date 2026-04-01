@@ -3,14 +3,14 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pseudo-intelligence-core"
+name = "correx"
 version = "0.1.0"
 description = "AI Correction OS — persistent human correction memory that makes AI learn from feedback"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-    {name = "Pseudo Intelligence Project"},
+    {name = "ozoz5"},
 ]
 keywords = [
     "ai", "correction", "memory", "mcp", "llm",
@@ -32,7 +32,7 @@ Documentation = "https://github.com/ozoz5/correx#readme"
 Repository = "https://github.com/ozoz5/correx"
 
 [project.scripts]
-pseudo-intelligence = "claude_pseudo_intelligence.mcp_server:main"
+correx = "correx.mcp_server:main"
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.9.4,<2"]

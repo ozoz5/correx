@@ -73,16 +73,14 @@ source .venv/bin/activate
 pip install -e ".[mcp]"
 ```
 
-> **Naming note:** The repo is `correx`. The Python package is `claude_pseudo_intelligence` and the MCP server registers as `pseudo-intelligence`. These names reflect the project's history and will converge in a future release.
-
 ### Add to Claude Code
 
 ```bash
-claude mcp add pseudo-intelligence \
+claude mcp add correx \
   -s user \
   -- /path/to/correx/.venv/bin/python \
-  -m claude_pseudo_intelligence \
-  --memory-dir ~/.pseudo-intelligence \
+  -m correx \
+  --memory-dir ~/.correx \
   --transport stdio
 ```
 
@@ -93,11 +91,11 @@ claude mcp add pseudo-intelligence \
 ```json
 {
   "mcpServers": {
-    "pseudo-intelligence": {
+    "correx": {
       "command": "/path/to/correx/.venv/bin/python",
       "args": [
-        "-m", "claude_pseudo_intelligence",
-        "--memory-dir", "/Users/you/.pseudo-intelligence",
+        "-m", "correx",
+        "--memory-dir", "/Users/you/.correx",
         "--transport", "stdio"
       ]
     }
@@ -166,7 +164,7 @@ The plant grows slowly. Like your AI.
 
 ```
 correx/
-  src/claude_pseudo_intelligence/
+  src/correx/
     mcp_server.py          # MCP tool definitions
     service.py             # Core service layer
     history_store.py       # Persistence + I/O orchestration
@@ -178,7 +176,7 @@ correx/
   tests/                   # 90 tests passing
 ```
 
-All data stored as JSON in `~/.pseudo-intelligence/`. No database required.
+All data stored as JSON in `~/.correx/`. No database required.
 
 ---
 
@@ -191,7 +189,7 @@ pip install -e ".[train]"
 
 python3 scripts/auto_train.py \
   --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-  --memory-dir ~/.pseudo-intelligence \
+  --memory-dir ~/.correx \
   --output-dir ./training_artifacts
 ```
 

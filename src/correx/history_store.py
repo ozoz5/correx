@@ -128,7 +128,7 @@ class HistoryStore:
                     if isinstance(payload, list):
                         import sys
                         print(
-                            f"[pseudo-intelligence] WARNING: {path.name} missing, recovered from backup",
+                            f"[correx] WARNING: {path.name} missing, recovered from backup",
                             file=sys.stderr,
                         )
                         return [item for item in payload if isinstance(item, dict)]
@@ -141,7 +141,7 @@ class HistoryStore:
             # Primary file is corrupted — try backup
             import sys
             print(
-                f"[pseudo-intelligence] ERROR: {path.name} corrupted ({exc}), trying backup",
+                f"[correx] ERROR: {path.name} corrupted ({exc}), trying backup",
                 file=sys.stderr,
             )
             backup = path.with_suffix(path.suffix + ".bak")
@@ -150,21 +150,21 @@ class HistoryStore:
                     payload = json.loads(backup.read_text(encoding="utf-8"))
                     if isinstance(payload, list):
                         print(
-                            f"[pseudo-intelligence] RECOVERED: loaded {len(payload)} items from {backup.name}",
+                            f"[correx] RECOVERED: loaded {len(payload)} items from {backup.name}",
                             file=sys.stderr,
                         )
                         return [item for item in payload if isinstance(item, dict)]
                 except Exception:
                     pass
             print(
-                f"[pseudo-intelligence] DATA LOSS: no usable backup for {path.name}",
+                f"[correx] DATA LOSS: no usable backup for {path.name}",
                 file=sys.stderr,
             )
             return []
         except Exception as exc:
             import sys
             print(
-                f"[pseudo-intelligence] ERROR: failed to read {path.name}: {exc}",
+                f"[correx] ERROR: failed to read {path.name}: {exc}",
                 file=sys.stderr,
             )
             return []

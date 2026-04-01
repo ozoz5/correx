@@ -1,14 +1,11 @@
 {
   "mcpServers": {
-    "pseudo-intelligence": {
-      "command": "python3",
+    "correx": {
+      "command": "/path/to/correx/.venv/bin/python",
       "args": [
-        "-m",
-        "claude_pseudo_intelligence",
-        "--memory-dir",
-        "~/.pseudo-intelligence",
-        "--transport",
-        "stdio"
+        "-m", "correx",
+        "--memory-dir", "/Users/you/.correx",
+        "--transport", "stdio"
       ]
     }
   }

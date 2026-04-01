@@ -26,11 +26,11 @@ pip install -e ".[mcp]"
 ## Claude Code への追加
 
 ```bash
-claude mcp add pseudo-intelligence \
+claude mcp add correx \
   -s user \
   -- /path/to/correx/.venv/bin/python \
-  -m claude_pseudo_intelligence \
-  --memory-dir ~/.pseudo-intelligence \
+  -m correx \
+  --memory-dir ~/.correx \
   --transport stdio
 ```
 
@@ -41,19 +41,17 @@ claude mcp add pseudo-intelligence \
 ```json
 {
   "mcpServers": {
-    "pseudo-intelligence": {
+    "correx": {
       "command": "/path/to/correx/.venv/bin/python",
       "args": [
-        "-m", "claude_pseudo_intelligence",
-        "--memory-dir", "/Users/you/.pseudo-intelligence",
+        "-m", "correx",
+        "--memory-dir", "/Users/you/.correx",
         "--transport", "stdio"
       ]
     }
   }
 }
 ```
-
-> **命名について:** リポジトリ名は `correx`、Python パッケージは `claude_pseudo_intelligence`、MCP サーバー登録名は `pseudo-intelligence` です。将来のリリースで統一します。
 
 ## 主な MCP ツール
 
@@ -72,7 +70,7 @@ claude mcp add pseudo-intelligence \
 
 ```
 correx/
-  src/claude_pseudo_intelligence/
+  src/correx/
     mcp_server.py          # MCP ツール定義
     service.py             # コアサービス層
     history_store.py       # 永続化 + I/O オーケストレーション
@@ -84,7 +82,7 @@ correx/
   tests/                   # 90 テスト通過
 ```
 
-全データは `~/.pseudo-intelligence/` に JSON で保存。データベース不要。
+全データは `~/.correx/` に JSON で保存。データベース不要。
 
 ## LoRA 学習（オプション）
 
@@ -93,7 +91,7 @@ pip install -e ".[train]"
 
 python3 scripts/auto_train.py \
   --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-  --memory-dir ~/.pseudo-intelligence \
+  --memory-dir ~/.correx \
   --output-dir ./training_artifacts
 ```
 

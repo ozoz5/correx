@@ -10,7 +10,7 @@ from .chat_adapter import ChatLoopAdapter
 from .mlx_trainer import MlxLoraTrainingConfig
 from .service import PseudoIntelligenceService
 
-SERVER_NAME = "claude-pseudo-intelligence-core"
+SERVER_NAME = "correx"
 SERVER_INSTRUCTIONS = (
     "Use this server when you need persistent human correction memory, "
     "conversation-derived preference rules, training dataset export, or automatic "
@@ -35,7 +35,7 @@ def _require_fastmcp():
         if major >= 2:
             import sys
             print(
-                f"[pseudo-intelligence] WARNING: MCP SDK v{mcp_version} detected. "
+                f"[correx] WARNING: MCP SDK v{mcp_version} detected. "
                 f"This server was built for MCP <2. Some tools may not work correctly.",
                 file=sys.stderr,
             )

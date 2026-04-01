@@ -2,7 +2,7 @@ import shutil
 import subprocess
 import sys
 
-SERVICE_NAME = "claude_pseudo_intelligence_core"
+SERVICE_NAME = "correx"
 
 
 def supports_secure_storage():

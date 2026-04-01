@@ -7,8 +7,8 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from claude_pseudo_intelligence import ChatLoopAdapter, PseudoIntelligenceService
-from claude_pseudo_intelligence.mcp_server import _memory_summary
+from correx import ChatLoopAdapter, PseudoIntelligenceService
+from correx.mcp_server import _memory_summary
 
 
 class PseudoIntelligenceServiceTest(unittest.TestCase):

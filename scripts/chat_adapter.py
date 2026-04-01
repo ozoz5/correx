@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from claude_pseudo_intelligence import ChatLoopAdapter
+from correx import ChatLoopAdapter
 
 
 def _parse_json_arg(value: str) -> dict:
@@ -21,7 +21,7 @@ def _parse_json_arg(value: str) -> dict:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Thin chat-loop adapter for claude_pseudo_intelligence_core.")
+    parser = argparse.ArgumentParser(description="Thin chat-loop adapter for correx.")
     parser.add_argument("--memory-dir", default=str(ROOT_DIR / ".local-memory"))
     subparsers = parser.add_subparsers(dest="command", required=True)
 
