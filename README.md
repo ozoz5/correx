@@ -187,7 +187,7 @@ All data stored as JSON in `~/.pseudo-intelligence/`. No database required.
 CORREX can export your correction history as training data and trigger LoRA fine-tuning on Apple Silicon.
 
 ```bash
-pip install correx[train]
+pip install -e ".[train]"
 
 python3 scripts/auto_train.py \
   --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \

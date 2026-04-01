@@ -27,9 +27,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pseudo-intelligence/core"
-Documentation = "https://github.com/pseudo-intelligence/core#readme"
-Repository = "https://github.com/pseudo-intelligence/core"
+Homepage = "https://github.com/ozoz5/correx"
+Documentation = "https://github.com/ozoz5/correx#readme"
+Repository = "https://github.com/ozoz5/correx"
 
 [project.scripts]
 pseudo-intelligence = "claude_pseudo_intelligence.mcp_server:main"
