@@ -3,5 +3,24 @@ __pycache__/
 .pytest_cache/
 .venv/
 
-/.local-memory/*.json
+# Local memory data (personal corrections — never commit)
+/.local-memory/
 /training_artifacts/
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Python packaging artifacts
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp

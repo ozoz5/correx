@@ -47,6 +47,8 @@ from .memory_manager import (
     merge_latent_contexts,
     merge_similar_rules,
     reconsolidate_rules_from_turns,
+    resolve_contradicting_rules,
+    auto_correct_flagged_rules,
 )
 from .reaction_scorer import score_reaction
 from .llm_scorer import LlmScorer
@@ -56,7 +58,9 @@ from .schemas import (
     EpisodeRecord,
     LatentContext,
     LatentTransition,
+    Meaning,
     PreferenceRule,
+    Principle,
     RuleContext,
     TrainingExample,
 )
@@ -70,6 +74,10 @@ class HistoryStore:
         self.conversation_file = self.base_dir / "conversation_history.json"
         self.preference_rules_file = self.base_dir / "preference_rules.json"
         self.context_transitions_file = self.base_dir / "context_transitions.json"
+        self.meanings_file = self.base_dir / "meanings.json"
+        self.principles_file = self.base_dir / "principles.json"
+        self.personality_file = self.base_dir / "personality.json"
+        self.deferred_meanings_file = self.base_dir / "deferred_meanings.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -155,9 +163,15 @@ class HistoryStore:
                 file=sys.stderr,
             )
             return []
+        # Support both legacy (bare array) and versioned ({"schema_version": ..., "items": [...]}) formats
+        if isinstance(payload, dict) and "items" in payload:
+            payload = payload["items"]
         if not isinstance(payload, list):
             return []
         return [item for item in payload if isinstance(item, dict)]
+
+    # Schema version embedded in every JSON file for forward/backward compat.
+    SCHEMA_VERSION = "1.0"
 
     def _atomic_write_json(self, path: Path, payload: list[dict]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,6 +183,8 @@ class HistoryStore:
                 shutil.copy2(path, backup)
             except OSError:
                 pass  # Best-effort backup
+        # Wrap payload with schema version for migration safety
+        versioned = {"schema_version": self.SCHEMA_VERSION, "items": payload}
         with NamedTemporaryFile(
             "w",
             encoding="utf-8",
@@ -177,7 +193,7 @@ class HistoryStore:
             suffix=".tmp",
             delete=False,
         ) as temp_file:
-            json.dump(payload, temp_file, ensure_ascii=False, indent=2)
+            json.dump(versioned, temp_file, ensure_ascii=False, indent=2)
             temp_file.flush()
             os.fsync(temp_file.fileno())
             temp_path = Path(temp_file.name)
@@ -206,6 +222,54 @@ class HistoryStore:
 
     def _write_context_transitions_unlocked(self, transitions: list[LatentTransition]) -> None:
         self._atomic_write_json(self.context_transitions_file, [asdict(transition) for transition in transitions])
+
+    def _load_meanings_unlocked(self) -> list[Meaning]:
+        return [self._normalize_meaning(item) for item in self._read_json_list(self.meanings_file)]
+
+    def _write_meanings_unlocked(self, meanings: list[Meaning]) -> None:
+        self._atomic_write_json(self.meanings_file, [asdict(m) for m in meanings])
+
+    @staticmethod
+    def _normalize_meaning(item: dict) -> Meaning:
+        return Meaning(
+            id=str(item.get("id", "")),
+            principle=str(item.get("principle", "")),
+            normalized_principle=str(item.get("normalized_principle", "")),
+            summary=str(item.get("summary", "")),
+            source_rule_ids=list(item.get("source_rule_ids", [])),
+            scopes=list(item.get("scopes", [])),
+            tags=list(item.get("tags", [])),
+            strength=int(item.get("strength", 0)),
+            cross_scope_count=int(item.get("cross_scope_count", 0)),
+            confidence=float(item.get("confidence", 0.0)),
+            first_seen_at=str(item.get("first_seen_at", "")),
+            last_seen_at=str(item.get("last_seen_at", "")),
+            personal_settings_overlap=list(item.get("personal_settings_overlap", [])),
+            status=str(item.get("status", "active")),
+        )
+
+    def _load_principles_unlocked(self) -> list[Principle]:
+        return [self._normalize_principle(item) for item in self._read_json_list(self.principles_file)]
+
+    def _write_principles_unlocked(self, principles: list[Principle]) -> None:
+        self._atomic_write_json(self.principles_file, [asdict(p) for p in principles])
+
+    @staticmethod
+    def _normalize_principle(item: dict) -> Principle:
+        return Principle(
+            id=str(item.get("id", "")),
+            declaration=str(item.get("declaration", "")),
+            normalized_declaration=str(item.get("normalized_declaration", "")),
+            source_meaning_ids=list(item.get("source_meaning_ids", [])),
+            source_rule_count=int(item.get("source_rule_count", 0)),
+            depth=int(item.get("depth", 3)),
+            scopes=list(item.get("scopes", [])),
+            confidence=float(item.get("confidence", 0.0)),
+            first_seen_at=str(item.get("first_seen_at", "")),
+            last_seen_at=str(item.get("last_seen_at", "")),
+            personal_settings_overlap=list(item.get("personal_settings_overlap", [])),
+            status=str(item.get("status", "active")),
+        )
 
     def _normalize_entry(self, item: dict) -> EpisodeRecord:
         corrections = [
@@ -559,10 +623,88 @@ class HistoryStore:
                 rule.distinct_tag_count = len([context for context in rule.contexts if context.kind == "tag"])
         return rule
 
+    def _get_active_profile(self) -> str:
+        """Read active profile from profiles.json."""
+        profiles_path = self.base_dir / "profiles.json"
+        if profiles_path.exists():
+            try:
+                data = json.loads(profiles_path.read_text(encoding="utf-8"))
+                return data.get("active", "personal")
+            except Exception:
+                pass
+        return "personal"
+
+    def _load_public_rules_unlocked(self) -> list[PreferenceRule]:
+        public_file = self.base_dir / "profiles" / "public_rules.json"
+        return [self._normalize_rule(item) for item in self._read_json_list(public_file)]
+
     def load_preference_rules(self) -> list[PreferenceRule]:
         handle = self._lock_handle()
         try:
-            return self._load_preference_rules_unlocked()
+            profile = self._get_active_profile()
+            personal = self._load_preference_rules_unlocked()
+            if profile == "public":
+                return self._load_public_rules_unlocked()
+            elif profile == "hybrid":
+                return personal + self._load_public_rules_unlocked()
+            return personal  # default: personal
+        finally:
+            self._unlock_handle(handle)
+
+    def load_meanings(self) -> list[Meaning]:
+        handle = self._lock_handle()
+        try:
+            return self._load_meanings_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+    def write_meanings(self, meanings: list[Meaning]) -> None:
+        handle = self._lock_handle()
+        try:
+            self._write_meanings_unlocked(meanings)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_principles(self) -> list[Principle]:
+        handle = self._lock_handle()
+        try:
+            return self._load_principles_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+    def write_principles(self, principles: list[Principle]) -> None:
+        handle = self._lock_handle()
+        try:
+            self._write_principles_unlocked(principles)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_personality(self) -> dict:
+        handle = self._lock_handle()
+        try:
+            data = self._read_json_list(self.personality_file)
+            return data[0] if data else {}
+        finally:
+            self._unlock_handle(handle)
+
+    def write_personality(self, profile_dict: dict) -> None:
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.personality_file, [profile_dict])
+        finally:
+            self._unlock_handle(handle)
+
+    def load_deferred_meanings(self) -> list[Meaning]:
+        handle = self._lock_handle()
+        try:
+            return [self._normalize_meaning(item) for item in self._read_json_list(self.deferred_meanings_file)]
+        finally:
+            self._unlock_handle(handle)
+
+    def write_deferred_meanings(self, meanings: list[Meaning]) -> None:
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.deferred_meanings_file, [asdict(m) for m in meanings])
         finally:
             self._unlock_handle(handle)
 
@@ -947,6 +1089,16 @@ class HistoryStore:
                 merge_result.merged_rules,
                 list(reversed(turns)),
             )
+            # Load personality metabolism for adaptive thresholds (read directly, already locked)
+            personality_data = self._read_json_list(self.personality_file)
+            personality_dict = personality_data[0] if personality_data else {}
+            metabolism = personality_dict.get("metabolism_rate", 0.5)
+            # P0: Auto-resolve conflicting rules (metabolism modulates safety guard)
+            final_rules, _conflict_log = resolve_contradicting_rules(final_rules, metabolism_rate=metabolism)
+            # P0: Auto-correct needs_revision rules (metabolism modulates wait time)
+            from datetime import datetime as _dt
+            now_str = _dt.now().strftime("%Y/%m/%d %H:%M")
+            final_rules, _correction_log = auto_correct_flagged_rules(final_rules, now_str, metabolism_rate=metabolism)
             self._write_preference_rules_unlocked(final_rules)
             return final_rules
         finally:
@@ -970,6 +1122,171 @@ class HistoryStore:
             return transitions
         finally:
             self._unlock_handle(handle)
+
+    def synthesize_rules(self) -> list[dict]:
+        """Generate rule hypotheses from success/failure pattern differences.
+        This is the system's autonomous reasoning — deriving new rules
+        without human input, based on statistical patterns in past interactions."""
+        handle = self._lock_handle()
+        try:
+            turns = self._load_conversation_turns_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+        success = [t for t in turns if (t.reaction_score or 0) >= 0.7]
+        failure = [t for t in turns if (t.reaction_score or 0) < 0.4]
+        if len(success) < 2 or len(failure) < 2:
+            return []
+
+        success_tags = Counter(tag for t in success for tag in (t.tags or []))
+        failure_tags = Counter(tag for t in failure for tag in (t.tags or []))
+        success_scopes = Counter(t.task_scope for t in success if t.task_scope)
+        failure_scopes = Counter(t.task_scope for t in failure if t.task_scope)
+
+        hypotheses = []
+
+        # Tags that appear in success but rarely in failure
+        for tag, count in success_tags.most_common(30):
+            if len(tag) < 4:
+                continue
+            success_rate = count / len(success)
+            failure_rate = failure_tags.get(tag, 0) / max(1, len(failure))
+            if success_rate > 0.3 and failure_rate < 0.1:
+                hypotheses.append({
+                    "instruction": f"タスクに「{tag}」が関連するとき、成功パターンを適用せよ (成功率{success_rate:.0%})",
+                    "source": "synthesized",
+                    "confidence": round(success_rate - failure_rate, 2),
+                    "tag": tag,
+                })
+
+        # Scopes where success is dominant
+        for scope, s_count in success_scopes.most_common(10):
+            f_count = failure_scopes.get(scope, 0)
+            if s_count > f_count * 2 and s_count >= 2:
+                hypotheses.append({
+                    "instruction": f"スコープ「{scope}」では現在の方針が効いている。維持せよ",
+                    "source": "synthesized",
+                    "confidence": round(s_count / (s_count + f_count), 2),
+                    "tag": scope,
+                })
+
+        # Corrections from successful turns that could be generalized
+        success_corrections = []
+        for t in success:
+            for c in (t.extracted_corrections or []):
+                if len(c) > 10:
+                    success_corrections.append(c)
+        correction_counts = Counter(success_corrections)
+        for correction, count in correction_counts.most_common(5):
+            if count >= 2:
+                hypotheses.append({
+                    "instruction": correction,
+                    "source": "synthesized_from_success",
+                    "confidence": round(min(0.95, count * 0.2), 2),
+                    "tag": "success_pattern",
+                })
+
+        return hypotheses[:7]
+
+    def self_overcome(self) -> list[dict]:
+        """Übermensch: self-overcome — criticize and rewrite own rules.
+        Identifies weak, redundant, or overly narrow rules and proposes
+        stronger replacements. The system transcends itself."""
+        handle = self._lock_handle()
+        try:
+            rules = self._load_preference_rules_unlocked()
+            turns = self._load_conversation_turns_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+        promoted = [r for r in rules if r.status == "promoted"]
+        if len(promoted) < 5:
+            return []
+
+        proposals = []
+
+        # 1. Find rules with low confidence that should be sharpened or dropped
+        for r in promoted:
+            conf = getattr(r, "confidence_score", None) or 0
+            ev = r.evidence_count
+            if conf < 0.65 and ev <= 1:
+                proposals.append({
+                    "action": "demote",
+                    "rule_id": r.id,
+                    "instruction": r.instruction,
+                    "reason": f"confidence={conf:.2f}, evidence={ev}: 根拠が薄い。降格して再検証すべき",
+                })
+
+        # 2. Find rules that are too similar — merge into one stronger rule
+        seen_pairs: set[tuple[str, str]] = set()
+        for i, a in enumerate(promoted):
+            a_text = a.instruction.lower()
+            a_bigrams = {a_text[k:k+2] for k in range(len(a_text)-1)}
+            for j, b in enumerate(promoted):
+                if j <= i:
+                    continue
+                pair_key = (min(a.id, b.id), max(a.id, b.id))
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
+                b_text = b.instruction.lower()
+                b_bigrams = {b_text[k:k+2] for k in range(len(b_text)-1)}
+                if not a_bigrams or not b_bigrams:
+                    continue
+                overlap = len(a_bigrams & b_bigrams) / min(len(a_bigrams), len(b_bigrams))
+                if overlap > 0.4 and a.applies_to_scope == b.applies_to_scope:
+                    # Merge: keep the one with higher confidence
+                    keep = a if (getattr(a, "confidence_score", 0) or 0) >= (getattr(b, "confidence_score", 0) or 0) else b
+                    drop = b if keep == a else a
+                    proposals.append({
+                        "action": "merge",
+                        "keep_id": keep.id,
+                        "drop_id": drop.id,
+                        "keep_instruction": keep.instruction,
+                        "drop_instruction": drop.instruction,
+                        "reason": f"overlap={overlap:.0%}: 類似ルールの統合。より強い方を残す",
+                    })
+
+        # 3. Find rules whose scope is too narrow — propose generalization
+        scope_counts = Counter(r.applies_to_scope for r in promoted)
+        for scope, count in scope_counts.items():
+            if count >= 3:
+                scope_rules = [r for r in promoted if r.applies_to_scope == scope]
+                # Check if these rules share a common pattern that could be generalized
+                all_tokens = Counter()
+                for r in scope_rules:
+                    for token in r.instruction.lower().split():
+                        if len(token) > 3:
+                            all_tokens[token] += 1
+                common = [tok for tok, c in all_tokens.most_common(5) if c >= 2]
+                if common:
+                    proposals.append({
+                        "action": "generalize",
+                        "scope": scope,
+                        "rule_count": count,
+                        "common_themes": common[:5],
+                        "reason": f"scope={scope}に{count}件のルール。共通テーマ: {', '.join(common[:3])}",
+                    })
+
+        # 4. Find rules that contradict each other
+        for i, a in enumerate(promoted):
+            for j, b in enumerate(promoted):
+                if j <= i:
+                    continue
+                # Simple contradiction detection: same scope, opposite keywords
+                if a.applies_to_scope == b.applies_to_scope:
+                    a_neg = set(getattr(a, "negative_conditions", []) or [])
+                    if b.instruction in a_neg or a.instruction in (getattr(b, "negative_conditions", []) or []):
+                        proposals.append({
+                            "action": "resolve_conflict",
+                            "rule_a_id": a.id,
+                            "rule_b_id": b.id,
+                            "rule_a": a.instruction,
+                            "rule_b": b.instruction,
+                            "reason": "直接矛盾。文脈限定で解決するか、一方を降格すべき",
+                        })
+
+        return proposals[:10]
 
     def find_entry(self, entry_id: str) -> EpisodeRecord | None:
         handle = self._lock_handle()

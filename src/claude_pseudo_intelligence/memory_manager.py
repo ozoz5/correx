@@ -1347,6 +1347,168 @@ def detect_contradicting_rules(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Conflict Resolution — auto-resolve detected conflicts
+# ---------------------------------------------------------------------------
+
+
+def resolve_contradicting_rules(
+    rules: list[PreferenceRule],
+    metabolism_rate: float = 0.5,
+) -> tuple[list[PreferenceRule], list[dict[str, str]]]:
+    """Detect and auto-resolve contradicting rules.
+
+    Returns (updated_rules, resolution_log).
+    WARNING: Mutates rule objects in-place. Pass copies if you need the originals.
+
+    Resolution strategy:
+    - negation_conflict: demote the rule with lower (confidence × evidence_count).
+      Safety guard threshold scales with metabolism_rate.
+    - scope_conflict: add each rule's instruction to the other's negative_conditions
+      so they no longer overlap. Neither rule is demoted.
+    """
+    conflicts = detect_contradicting_rules(rules)
+    if not conflicts:
+        return rules, []
+
+    demoted_ids: set[str] = set()
+    log: list[dict[str, str]] = []
+
+    for rule_a, rule_b, reason in conflicts:
+        if rule_a.id in demoted_ids or rule_b.id in demoted_ids:
+            continue  # already resolved
+
+        if reason == "negation_conflict":
+            strength_a = (getattr(rule_a, "confidence_score", 0.5) or 0.5) * rule_a.evidence_count
+            strength_b = (getattr(rule_b, "confidence_score", 0.5) or 0.5) * rule_b.evidence_count
+
+            # Safety guard: don't demote well-established rules
+            # Aggressive users have a lower bar for demotion (3 instead of 5)
+            guard_threshold = max(2, round(5 * (1.5 - metabolism_rate)))
+            double_guard = guard_threshold * 2
+            if rule_a.evidence_count >= guard_threshold and rule_b.evidence_count < double_guard:
+                if strength_a < strength_b:
+                    continue
+            if rule_b.evidence_count >= guard_threshold and rule_a.evidence_count < double_guard:
+                if strength_b < strength_a:
+                    continue
+
+            if strength_a >= strength_b:
+                loser, winner = rule_b, rule_a
+            else:
+                loser, winner = rule_a, rule_b
+
+            loser.status = "demoted"
+            loser.priority = max(1, loser.priority - 2)
+            if "conflict_demoted" not in loser.tags:
+                loser.tags.append("conflict_demoted")
+            demoted_ids.add(loser.id)
+            log.append({
+                "action": "demote",
+                "reason": reason,
+                "winner": winner.id,
+                "loser": loser.id,
+                "winner_instruction": winner.instruction[:60],
+                "loser_instruction": loser.instruction[:60],
+            })
+
+        elif reason == "scope_conflict":
+            # Scope separation: add to each other's negative_conditions
+            if rule_a.instruction not in rule_b.negative_conditions:
+                rule_b.negative_conditions.append(rule_a.instruction)
+            if rule_b.instruction not in rule_a.negative_conditions:
+                rule_a.negative_conditions.append(rule_b.instruction)
+            log.append({
+                "action": "scope_separate",
+                "reason": reason,
+                "rule_a": rule_a.id,
+                "rule_b": rule_b.id,
+            })
+
+    return rules, log
+
+
+# ---------------------------------------------------------------------------
+# 4c. Self-Correction — auto-fix needs_revision rules
+# ---------------------------------------------------------------------------
+
+
+def auto_correct_flagged_rules(
+    rules: list[PreferenceRule],
+    now_str: str,
+    *,
+    max_revision_age_days: float = 14.0,
+    min_confidence_for_keep: float = 0.3,
+    metabolism_rate: float = 0.5,
+) -> tuple[list[PreferenceRule], list[dict[str, str]]]:
+    """Auto-correct rules flagged with needs_revision.
+
+    Strategy:
+    - needs_revision + evidence_count <= 1 → delete (not enough evidence)
+    - needs_revision + confidence < min_confidence_for_keep + aged > max_revision_age_days → demote
+    - needs_revision + confidence >= min_confidence_for_keep → narrow scope
+      (add failure context to negative_conditions)
+
+    Returns (updated_rules, correction_log).
+    """
+    # Aggressive users wait less before demoting flagged rules
+    max_revision_age_days = max_revision_age_days * (1.5 - metabolism_rate)
+    now = datetime.strptime(now_str, "%Y/%m/%d %H:%M")
+    corrected: list[PreferenceRule] = []
+    log: list[dict[str, str]] = []
+
+    for rule in rules:
+        if "needs_revision" not in (rule.tags or []):
+            corrected.append(rule)
+            continue
+
+        confidence = getattr(rule, "confidence_score", 0.5) or 0.5
+
+        # Low evidence → delete entirely
+        if rule.evidence_count <= 1:
+            log.append({
+                "action": "delete",
+                "rule_id": rule.id,
+                "reason": "needs_revision with evidence_count <= 1",
+                "instruction": rule.instruction[:60],
+            })
+            continue  # don't add to corrected
+
+        # Check age of the revision flag
+        try:
+            last_dt = datetime.strptime(rule.last_recorded_at, "%Y/%m/%d %H:%M")
+            age_days = (now - last_dt).total_seconds() / 86400
+        except (ValueError, AttributeError):
+            age_days = 0
+
+        if confidence < min_confidence_for_keep and age_days > max_revision_age_days:
+            # Demote: too long flagged, low confidence
+            rule.status = "demoted"
+            if "self_corrected" not in rule.tags:
+                rule.tags.append("self_corrected")
+            log.append({
+                "action": "demote",
+                "rule_id": rule.id,
+                "reason": f"needs_revision for {age_days:.0f}d, confidence {confidence:.2f}",
+                "instruction": rule.instruction[:60],
+            })
+            corrected.append(rule)
+        else:
+            # Narrow scope: add scope as negative_condition to limit where it applies
+            scope = rule.applies_to_scope
+            if scope and scope not in rule.negative_conditions:
+                rule.negative_conditions.append(f"not-{scope}")
+            log.append({
+                "action": "narrow",
+                "rule_id": rule.id,
+                "reason": f"needs_revision, confidence {confidence:.2f}, narrowing scope",
+                "instruction": rule.instruction[:60],
+            })
+            corrected.append(rule)
+
+    return corrected, log
+
+
+# ---------------------------------------------------------------------------
 # 5. Forgetting Curve — Ebbinghaus-style priority decay
 # ---------------------------------------------------------------------------
 
@@ -1354,6 +1516,7 @@ def apply_forgetting_curve(
     rules: list[PreferenceRule],
     now_str: str,
     half_life_days: float = 30.0,
+    metabolism_rate: float = 0.5,
 ) -> list[PreferenceRule]:
     """Apply forgetting curve to rule priorities.
 
@@ -1365,7 +1528,13 @@ def apply_forgetting_curve(
         rules: List of PreferenceRule objects.
         now_str: Current datetime string in "2026/03/29 00:00" format.
         half_life_days: Half-life in days for candidate rules (promoted uses 2x).
+        metabolism_rate: 0.0=conservative (slow decay), 1.0=aggressive (fast decay).
+            Modulates the effective half-life: aggressive users forget faster.
     """
+    # Metabolism modulates base half-life: aggressive → shorter, conservative → longer
+    # Range: 0.5x (aggressive) to 1.5x (conservative)
+    metabolism_factor = 1.5 - metabolism_rate  # 0.0→1.5, 0.5→1.0, 1.0→0.5
+    half_life_days = half_life_days * metabolism_factor
     now = datetime.strptime(now_str, "%Y/%m/%d %H:%M")
     result: list[PreferenceRule] = []
 

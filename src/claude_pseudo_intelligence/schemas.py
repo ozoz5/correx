@@ -142,6 +142,40 @@ class TrainingExample:
 
 
 @dataclass(slots=True)
+class Meaning:
+    id: str
+    principle: str
+    normalized_principle: str
+    summary: str
+    source_rule_ids: list[str] = field(default_factory=list)
+    scopes: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    strength: int = 0
+    cross_scope_count: int = 0
+    confidence: float = 0.0
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+    personal_settings_overlap: list[str] = field(default_factory=list)
+    status: str = "active"
+
+
+@dataclass(slots=True)
+class Principle:
+    id: str
+    declaration: str              # 人格宣言テキスト
+    normalized_declaration: str
+    source_meaning_ids: list[str] = field(default_factory=list)
+    source_rule_count: int = 0    # 全ソースルール数（意味経由）
+    depth: int = 3                # 抽象レベル (1=rule, 2=meaning, 3=principle)
+    scopes: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    first_seen_at: str = ""
+    last_seen_at: str = ""
+    personal_settings_overlap: list[str] = field(default_factory=list)
+    status: str = "active"
+
+
+@dataclass(slots=True)
 class EpisodeRecord:
     id: str
     timestamp: str

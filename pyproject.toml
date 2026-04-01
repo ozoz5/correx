@@ -36,8 +36,8 @@ pseudo-intelligence = "claude_pseudo_intelligence.mcp_server:main"
 
 [project.optional-dependencies]
 mcp = ["mcp[cli]>=1.9.4,<2"]
-train = ["mlx-lm[train]"]
-full = ["mcp[cli]>=1.9.4,<2", "mlx-lm[train]"]
+train = ["mlx-lm[train]>=0.13,<1"]
+full = ["mcp[cli]>=1.9.4,<2", "mlx-lm[train]>=0.13,<1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

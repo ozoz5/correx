@@ -4,9 +4,9 @@ model_reasoning_effort = "xhigh"
 [mcp_servers."pseudo-intelligence"]
 command = "/opt/homebrew/bin/python3"
 args = [
-  "/Users/setohirokazu/Desktop/claude_pseudo_intelligence_core/scripts/run_mcp_server.py",
+  "/path/to/correx/scripts/run_mcp_server.py",
   "--memory-dir",
-  "/Users/setohirokazu/.pseudo-intelligence",
+  "~/.pseudo-intelligence",
   "--transport",
   "stdio",
 ]

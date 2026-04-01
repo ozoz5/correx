@@ -272,6 +272,22 @@ def _score_preference_rule(
         ],
     }
 
+    # --- Friston: surprise-weighted attention ---
+    # Rules where confidence diverges from actual outcomes get attention boost.
+    # High confidence + poor outcomes = prediction error = surprise = must attend.
+    if hasattr(rule, 'confidence_score') and rule.confidence_score and rule.confidence_score > 0.5:
+        # Check if recent evidence contradicts confidence
+        actual_success_rate = (
+            rule.success_count / max(1, rule.success_count + rule.failure_count)
+            if hasattr(rule, 'success_count') and rule.success_count is not None
+            else rule.confidence_score
+        )
+        prediction_error = abs(rule.confidence_score - actual_success_rate)
+        if prediction_error > 0.2:
+            surprise_bonus = min(3, round(prediction_error * 5))
+            score += surprise_bonus
+            reasons.append(f"surprise:{prediction_error:.2f}")
+
     if score <= 0:
         return 0, " | ".join(reasons), snapshot
     if rule.context_mode == "local" and not scope_matched and not keyword_matched and not semantic_hit:
@@ -488,6 +504,7 @@ def build_conversation_guidance(
     correction_limit: int = 3,
     previous_context_nodes: list[dict] | None = None,
     transitions: list[LatentTransition] | None = None,
+    meanings: list | None = None,
 ) -> str:
     relevant_rules = get_relevant_preference_rules(
         rules,
@@ -539,5 +556,20 @@ def build_conversation_guidance(
             lines.append(f"- Scope: {item['task_scope'] or 'generic'} ({item['reason']})")
             for correction in item["extracted_corrections"][:2]:
                 lines.append(f"  - {correction}")
+
+    # Inject meanings (emergent value principles)
+    if meanings:
+        top_meanings = sorted(
+            [m for m in meanings if getattr(m, "status", "") == "active"],
+            key=lambda m: (-getattr(m, "strength", 0), -getattr(m, "cross_scope_count", 0)),
+        )[:3]
+        if top_meanings:
+            lines.append("## Value Principles (emergent from multiple rules)")
+            for m in top_meanings:
+                scopes_str = "/".join(getattr(m, "scopes", [])[:3])
+                lines.append(
+                    f"- {getattr(m, 'principle', '')} "
+                    f"(strength: {getattr(m, 'strength', 0)}, scopes: {scopes_str})"
+                )
 
     return "\n".join(lines)

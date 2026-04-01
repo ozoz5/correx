@@ -19,13 +19,28 @@ SERVER_INSTRUCTIONS = (
 
 
 def _require_fastmcp():
+    """Import FastMCP with version checking and clear error messages."""
     try:
         from mcp.server.fastmcp import Context, FastMCP
-    except ImportError as error:  # pragma: no cover - exercised in runtime environments
+    except ImportError as error:  # pragma: no cover
         raise RuntimeError(
             "MCP support requires the official Python SDK. Install it with "
             "`python3 -m pip install -e '.[mcp]'` or `pip install \"mcp[cli]>=1.9.4,<2\"`."
         ) from error
+    # Version guard: detect MCP SDK version for forward-compat warnings
+    try:
+        import mcp
+        mcp_version = getattr(mcp, "__version__", "unknown")
+        major = int(mcp_version.split(".")[0]) if mcp_version != "unknown" else 1
+        if major >= 2:
+            import sys
+            print(
+                f"[pseudo-intelligence] WARNING: MCP SDK v{mcp_version} detected. "
+                f"This server was built for MCP <2. Some tools may not work correctly.",
+                file=sys.stderr,
+            )
+    except (ValueError, AttributeError):
+        pass
     return Context, FastMCP
 
 
@@ -124,11 +139,12 @@ def _memory_summary(service: PseudoIntelligenceService) -> dict[str, Any]:
     rules = service.list_preference_rules()
     transitions = service.list_context_transitions()
     stable_rules = [rule for rule in rules if getattr(rule, "status", "") == "promoted"]
-    high_value_rules = [rule for rule in rules if getattr(rule, "expected_gain", 0.0) >= 2.0]
+    high_value_rules = [rule for rule in rules if getattr(rule, "expected_gain", 0.0) >= 0.8]
     general_rules = [rule for rule in rules if getattr(rule, "context_mode", "") == "general"]
     mixed_rules = [rule for rule in rules if getattr(rule, "context_mode", "") == "mixed"]
     local_rules = [rule for rule in rules if getattr(rule, "context_mode", "") == "local"]
     latent_context_count = sum(len(getattr(rule, "latent_contexts", []) or []) for rule in rules)
+    meanings = service.list_meanings()
     trainable_entries = [
         entry
         for entry in entries
@@ -140,14 +156,18 @@ def _memory_summary(service: PseudoIntelligenceService) -> dict[str, Any]:
         "conversation_turn_count": len(turns),
         "preference_rule_count": len(rules),
         "stable_rule_count": len(stable_rules),
-        "promoted_rule_count": len(stable_rules),
+        "promoted_rule_count": len([r for r in rules if getattr(r, "status", "") == "promoted"]),
         "high_value_rule_count": len(high_value_rules),
         "general_rule_count": len(general_rules),
         "mixed_rule_count": len(mixed_rules),
         "local_rule_count": len(local_rules),
         "latent_context_count": latent_context_count,
         "context_transition_count": len(transitions),
+        "meaning_count": len(meanings),
+        "cross_scope_meanings": len([m for m in meanings if m.cross_scope_count >= 2]),
         "accepted_training_example_count": len(trainable_entries),
+        "personality_metabolism": service.history.load_personality().get("metabolism_label", "unknown"),
+        "personality_digestibility": service.history.load_personality().get("digestibility_label", "unknown"),
         "latest_entries": [_summarize_entry(entry) for entry in entries[:5]],
         "latest_preference_rules": [_summarize_rule(rule) for rule in rules[:5]],
         "latest_context_transitions": [_summarize_transition(item) for item in transitions[:5]],
@@ -376,6 +396,115 @@ def create_mcp_server(
         }
 
     @mcp.tool()
+    def synthesize_meanings() -> dict[str, Any]:
+        """Detect emergent value principles from cross-scope rule clusters.
+
+        Analyzes all preference rules to find clusters of rules from different
+        scopes that point to the same unstated principle. These meanings represent
+        the user's implicit value system -- judgment principles that exist in no
+        individual rule but emerge from their intersection.
+
+        Run this after accumulating new rules, or during a sleep/reflection phase.
+        """
+        meanings = service.synthesize_meanings()
+        new_ones = [m for m in meanings if m.first_seen_at == m.last_seen_at]
+        return {
+            "ok": True,
+            "count": len(meanings),
+            "new_count": len(new_ones),
+            "items": [
+                {
+                    "id": m.id,
+                    "principle": m.principle,
+                    "summary": m.summary,
+                    "strength": m.strength,
+                    "cross_scope_count": m.cross_scope_count,
+                    "scopes": m.scopes,
+                    "confidence": m.confidence,
+                    "source_rule_count": len(m.source_rule_ids),
+                    "personal_settings_overlap": m.personal_settings_overlap,
+                    "status": m.status,
+                }
+                for m in meanings[:15]
+            ],
+            "memory_summary": _memory_summary(service),
+        }
+
+    @mcp.tool()
+    def list_meanings(limit: int = 10) -> dict[str, Any]:
+        """View the user's emergent value principles synthesized from rule clusters."""
+        meanings = service.list_meanings()[:max(1, min(limit, 50))]
+        return {
+            "items": [
+                {
+                    "id": m.id,
+                    "principle": m.principle,
+                    "summary": m.summary,
+                    "strength": m.strength,
+                    "cross_scope_count": m.cross_scope_count,
+                    "scopes": m.scopes,
+                    "confidence": m.confidence,
+                    "source_rule_count": len(m.source_rule_ids),
+                    "personal_settings_overlap": m.personal_settings_overlap,
+                    "status": m.status,
+                }
+                for m in meanings
+            ],
+            "count": len(meanings),
+        }
+
+    @mcp.tool()
+    def synthesize_principles() -> dict[str, Any]:
+        """Extract higher-order identity principles from meaning clusters.
+
+        Principles are the 'who you are' level. If rules say 'do this' and
+        meanings say 'why', principles say 'what kind of person you are'.
+        Run after synthesize_meanings to extract the deepest layer.
+        """
+        principles = service.synthesize_principles()
+        return {
+            "ok": True,
+            "count": len(principles),
+            "items": [
+                {
+                    "id": p.id,
+                    "declaration": p.declaration,
+                    "source_meaning_count": len(p.source_meaning_ids),
+                    "source_rule_count": p.source_rule_count,
+                    "depth": p.depth,
+                    "scopes": p.scopes,
+                    "confidence": p.confidence,
+                    "personal_settings_overlap": p.personal_settings_overlap,
+                    "status": p.status,
+                }
+                for p in principles
+            ],
+            "memory_summary": _memory_summary(service),
+        }
+
+    @mcp.tool()
+    def list_principles(limit: int = 10) -> dict[str, Any]:
+        """View identity-level principles — the deepest layer of the user's value system."""
+        principles = service.list_principles()[:max(1, min(limit, 50))]
+        return {
+            "items": [
+                {
+                    "id": p.id,
+                    "declaration": p.declaration,
+                    "source_meaning_count": len(p.source_meaning_ids),
+                    "source_rule_count": p.source_rule_count,
+                    "depth": p.depth,
+                    "scopes": p.scopes,
+                    "confidence": p.confidence,
+                    "personal_settings_overlap": p.personal_settings_overlap,
+                    "status": p.status,
+                }
+                for p in principles
+            ],
+            "count": len(principles),
+        }
+
+    @mcp.tool()
     def predict_next_contexts(
         previous_context_nodes: list[dict] | None = None,
         session_id: str = "",
@@ -398,6 +527,67 @@ def create_mcp_server(
             "items": predictions,
             "count": len(predictions),
             "used_context_nodes": context_nodes,
+        }
+
+    @mcp.tool()
+    def get_personality_profile() -> dict[str, Any]:
+        """Compute the user's personality profile from conversation history.
+
+        Returns 5 dimensions inferred from behavior data:
+        - metabolism_rate: how aggressively the user discards/adopts rules (0=conservative, 1=aggressive)
+        - reward_function: what triggers positive reactions (keywords + pattern)
+        - avoidance_function: what triggers negative reactions (keywords + pattern)
+        - digestibility: abstract vs concrete preference (0=concrete, 1=abstract)
+        - objective_drift: whether the user's goal has shifted recently
+
+        Also returns any detected intervention signals (cognitive traps).
+        """
+        profile = service.get_personality_profile()
+        interventions = service.get_interventions()
+        return {
+            "profile": {
+                "metabolism_rate": profile.metabolism_rate,
+                "metabolism_label": profile.metabolism_label,
+                "reward_keywords": profile.reward_keywords,
+                "reward_pattern": profile.reward_pattern,
+                "avoidance_keywords": profile.avoidance_keywords,
+                "avoidance_pattern": profile.avoidance_pattern,
+                "digestibility": profile.digestibility,
+                "digestibility_label": profile.digestibility_label,
+                "current_objective": profile.current_objective,
+                "objective_confidence": profile.objective_confidence,
+                "drift_detected": profile.drift_detected,
+                "drift_description": profile.drift_description,
+                "sample_size": profile.sample_size,
+                "computed_at": profile.computed_at,
+            },
+            "interventions": [
+                {
+                    "pattern_type": sig.pattern_type,
+                    "confidence": sig.confidence,
+                    "evidence": sig.evidence,
+                    "mirror_prompt": sig.mirror_prompt,
+                    "reward_frame": sig.reward_frame,
+                }
+                for sig in interventions
+            ],
+            "intervention_count": len(interventions),
+            "memory_summary": _memory_summary(service),
+            "self_overcome_proposals": service.self_overcome(),
+        }
+
+    @mcp.tool()
+    def synthesize_rules() -> dict[str, Any]:
+        """Generate rule hypotheses from success/failure pattern differences.
+
+        Derives candidate rules without human input, based on statistical patterns.
+        Returns proposed rules with confidence scores. These are NOT automatically
+        added to the rule store — use them as guidance or review manually.
+        """
+        hypotheses = service.synthesize_rules()
+        return {
+            "hypotheses": hypotheses,
+            "count": len(hypotheses),
         }
 
     @mcp.tool()

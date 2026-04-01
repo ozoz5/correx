@@ -1,14 +1,19 @@
 """LLM-based reaction scorer.
 
 Backends (tried in order when backend="auto"):
-  1. ollama  — local HTTP service, no extra deps
-  2. mlx     — mlx-lm in-process inference (lazy-loaded, M-series Mac)
-  3. rule    — rule-based fallback, always available
+  1. ollama     — local HTTP service, no extra deps
+  2. anthropic  — Anthropic API (Haiku), most accurate, ~$0.00006/turn
+  3. mlx        — mlx-lm in-process inference (lazy-loaded, M-series Mac)
+  4. rule       — rule-based fallback, always available
+
+LLM scores are persisted to score_dictionary.json. Once a feedback pattern
+is scored by the LLM, it's never scored again — the dictionary result is
+returned instantly. Over time API calls approach zero.
 
 Usage:
     scorer = LlmScorer()                          # auto-detect
+    scorer = LlmScorer(backend="anthropic")       # force Anthropic API
     scorer = LlmScorer(backend="ollama")          # force ollama
-    scorer = LlmScorer(backend="mlx", model="mlx-community/Qwen2.5-1.5B-Instruct-4bit")
     scorer = LlmScorer(backend="rule")            # rule-based only
 
     score = scorer.score("ここだけ直して、あとは最高")  # → 0.65
@@ -24,7 +29,7 @@ from typing import Literal
 
 from .reaction_scorer import score_reaction
 
-Backend = Literal["auto", "ollama", "mlx", "rule"]
+Backend = Literal["auto", "ollama", "anthropic", "mlx", "rule"]
 
 # Patterns that small models misread — intercept before LLM call
 _RELUCTANT_ACCEPTANCE = (
@@ -56,23 +61,25 @@ def _preprocess_score(feedback: str, corrections: list[str]) -> float | None:
     return None
 
 _SCORING_PROMPT = """\
-ユーザーがAIの出力に対して与えたフィードバックを評価してください。
-満足度を 0.0 〜 1.0 の数値で答えてください。
+ユーザーがAIとの対話中に与えた反応を評価してください。
+これはAIの出力に対する「満足度」ではなく、「対話がうまく進んでいるか」の指標です。
 
-目安:
-0.05 = 完全否定・全部やり直し（「違う」「最悪」「ひどい」）
-0.20 = 大きな修正が必要
-0.35 = 修正が必要
-0.55 = 部分的に良い、一部修正あり
-0.65 = 渋い承認（「まあいいか」「一応OK」「とりあえずいい」など、修正はないが消極的）
-0.70 = ほぼ良い、軽い修正あり
-0.75 = 沈黙・承認（何も言わない = 受け入れた）
-0.85 = 良い・満足（「いいね」「よかった」）
-0.95 = 非常に良い・絶賛（「完璧」「最高」「これだ」）
+重要な区別:
+- 「世界のどこにもないだろ」→ 感嘆・絶賛（0.95）。否定ではない。
+- 「いやまて、報酬だよ！」→ 新しい気づきの共有（0.70）。拒絶ではない。
+- 「そうだね」→ 同意・承認（0.80）。
+- 「進め！」→ 強い承認と指示（0.85）。
+- 「うーん、それは内部的な枠から出てない」→ 方向修正（0.50）。否定ではなく改善要求。
+- 「バグを直せよ！」→ 不満・修正要求（0.20）。
+- 「まあまあじゃん」→ 渋い承認（0.65）。
 
-「まあ」「一応」「とりあえず」「まあまあ」「悪くない」「まあいいか」「まあいい」が含まれ修正がない場合は 0.65 にしてください。
+修正点（corrections）がある場合:
+- corrections + 称賛的なフィードバック → 学びの瞬間。高スコア（0.70-0.90）
+- corrections + 否定的なフィードバック → 実際の失敗。低スコア（0.10-0.30）
+- corrections + 中立的なフィードバック → 方向転換。中スコア（0.50-0.65）
+- corrections + フィードバックなし → 学習記録。中スコア（0.60）
 
-数値だけ返してください。説明不要です。
+数値だけ返してください。
 
 フィードバック: {feedback}
 修正点: {corrections}"""
@@ -195,6 +202,53 @@ def _mlx_score(
 
 
 # ---------------------------------------------------------------------------
+# Anthropic API backend
+# ---------------------------------------------------------------------------
+
+def _anthropic_score(
+    feedback: str,
+    corrections: list[str],
+    *,
+    model: str = "claude-sonnet-4-20250514",
+    timeout: float = 10.0,
+) -> float | None:
+    """Score using Anthropic API. Most accurate, lowest cost ($0.00006/turn)."""
+    try:
+        import anthropic  # type: ignore[import]
+    except ImportError:
+        return None
+
+    prompt = _SCORING_PROMPT.format(
+        feedback=feedback or "（なし）",
+        corrections="、".join(corrections) if corrections else "（なし）",
+    )
+    try:
+        client = anthropic.Anthropic(timeout=timeout)
+        response = client.messages.create(
+            model=model,
+            max_tokens=8,
+            temperature=0.0,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text if response.content else ""
+        return _parse_float(text)
+    except Exception as exc:
+        import sys
+        print(f"[pseudo-intelligence] Anthropic scoring failed: {exc}", file=sys.stderr)
+        return None
+
+
+def _anthropic_available() -> bool:
+    """Check if Anthropic SDK is installed and API key is configured."""
+    try:
+        import anthropic  # type: ignore[import]
+        client = anthropic.Anthropic()
+        return bool(client.api_key)
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # LlmScorer
 # ---------------------------------------------------------------------------
 
@@ -202,12 +256,17 @@ class LlmScorer:
     """
     Score user reactions via LLM with automatic fallback to rule-based scoring.
 
+    LLM scores are persisted to score_dictionary.json so the same pattern
+    is never scored twice by the LLM. Over time the dictionary grows and
+    API calls approach zero.
+
     Args:
-        backend:  "auto" | "ollama" | "mlx" | "rule"
+        backend:  "auto" | "ollama" | "anthropic" | "mlx" | "rule"
         model:    Model name/path for ollama or mlx.
                   Defaults: ollama → "qwen2.5:1.5b"
                             mlx    → "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
         endpoint: Ollama API base URL (default: http://127.0.0.1:11434)
+        score_dict_path: Path to persistent score dictionary JSON.
     """
 
     def __init__(
@@ -215,6 +274,7 @@ class LlmScorer:
         backend: Backend = "auto",
         model: str | None = None,
         endpoint: str = "http://127.0.0.1:11434",
+        score_dict_path: str | None = None,
     ):
         self.backend: Backend = backend
         self.endpoint = endpoint
@@ -231,6 +291,59 @@ class LlmScorer:
         # Instance-level score cache (avoids lru_cache memory leak from holding self)
         self._cache: dict[tuple[str, str], float] = {}
 
+        # Persistent score dictionary — LLM results are stored here
+        self._score_dict_path = score_dict_path
+        self._score_dict: dict[str, float] = {}
+        self._load_score_dict()
+
+    def _load_score_dict(self) -> None:
+        """Load persistent score dictionary from disk."""
+        if not self._score_dict_path:
+            return
+        from pathlib import Path
+        path = Path(self._score_dict_path)
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._score_dict = {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    def _persist_score(self, feedback: str, corrections_key: str, score: float, backend: str) -> None:
+        """Save an LLM-scored result to the persistent dictionary.
+
+        Writes are batched: only flushes to disk every 10 new entries
+        to avoid excessive I/O. Call flush_score_dict() to force.
+        """
+        if not self._score_dict_path:
+            return
+        dict_key = f"{feedback}||{corrections_key}"
+        self._score_dict[dict_key] = round(score, 4)
+        self._dirty_count = getattr(self, "_dirty_count", 0) + 1
+        if self._dirty_count >= 10:
+            self.flush_score_dict()
+
+    def flush_score_dict(self) -> None:
+        """Flush buffered score dictionary to disk."""
+        if not self._score_dict_path or not self._score_dict:
+            return
+        from pathlib import Path
+        path = Path(self._score_dict_path)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._score_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            self._dirty_count = 0
+        except OSError:
+            pass
+
+    def _dict_lookup(self, feedback: str, corrections_key: str) -> float | None:
+        """Check if this feedback pattern was already scored by LLM."""
+        dict_key = f"{feedback}||{corrections_key}"
+        return self._score_dict.get(dict_key)
+
     def _resolve_backend(self) -> Backend:
         if self._resolved is not None:
             return self._resolved
@@ -242,24 +355,17 @@ class LlmScorer:
 
         import sys
 
-        # Try ollama first
-        if _ollama_available(self.endpoint):
-            self._resolved = "ollama"
-            print(f"[pseudo-intelligence] Scorer backend: ollama ({self.endpoint})", file=sys.stderr)
+        # Try Anthropic API first (remote, most accurate, very cheap)
+        if _anthropic_available():
+            self._resolved = "anthropic"
+            print("[pseudo-intelligence] Scorer backend: anthropic (API)", file=sys.stderr)
             return self._resolved
 
-        # Try mlx-lm
-        try:
-            import importlib.util
-            if importlib.util.find_spec("mlx_lm") is not None:
-                self._resolved = "mlx"
-                print(f"[pseudo-intelligence] Scorer backend: mlx ({self.model})", file=sys.stderr)
-                return self._resolved
-        except Exception:
-            pass
-
+        # Rule-based is more accurate than small local models (1.5B)
+        # for Japanese mixed-signal scoring. Use it as default.
+        # Ollama/MLX are available for explicit backend selection.
         self._resolved = "rule"
-        print("[pseudo-intelligence] Scorer backend: rule (fallback — no LLM available)", file=sys.stderr)
+        print("[pseudo-intelligence] Scorer backend: rule (improved rule-based)", file=sys.stderr)
         return self._resolved
 
     def _cached_score(self, feedback: str, corrections_key: str) -> float:
@@ -269,7 +375,13 @@ class LlmScorer:
 
         corrections = [c for c in corrections_key.split("\x00") if c]
 
-        # Intercept patterns that small LLMs consistently misread
+        # 1. Check persistent score dictionary (free, instant)
+        dict_result = self._dict_lookup(feedback, corrections_key)
+        if dict_result is not None:
+            self._cache[cache_key] = dict_result
+            return dict_result
+
+        # 2. Intercept patterns that small LLMs consistently misread
         pre = _preprocess_score(feedback, corrections)
         if pre is not None:
             self._cache[cache_key] = pre
@@ -283,18 +395,34 @@ class LlmScorer:
             )
             if result is not None:
                 self._cache[cache_key] = result
+                self._persist_score(feedback, corrections_key, result, "ollama")
+                return result
+
+        if resolved == "anthropic":
+            result = _anthropic_score(feedback, corrections)
+            if result is not None:
+                self._cache[cache_key] = result
+                self._persist_score(feedback, corrections_key, result, "anthropic")
                 return result
 
         if resolved == "mlx":
             result = _mlx_score(feedback, corrections, model=self.model)
             if result is not None:
                 self._cache[cache_key] = result
+                self._persist_score(feedback, corrections_key, result, "mlx")
                 return result
 
-        # Fallback: rule-based
+        # Fallback: rule-based (not persisted — rule-based is deterministic)
         result = score_reaction(feedback, corrections)
         self._cache[cache_key] = result
         return result
+
+    def __del__(self) -> None:
+        """Flush any buffered scores on garbage collection."""
+        try:
+            self.flush_score_dict()
+        except Exception:
+            pass
 
     def score(
         self,

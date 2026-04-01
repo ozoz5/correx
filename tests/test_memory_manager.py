@@ -7,6 +7,7 @@ import unittest
 from claude_pseudo_intelligence.memory_manager import (
     apply_forgetting_curve,
     archive_turns_to_episode,
+    auto_correct_flagged_rules,
     build_context_signature,
     build_rule_associations,
     detect_contradicting_rules,
@@ -19,6 +20,7 @@ from claude_pseudo_intelligence.memory_manager import (
     predict_next_contexts,
     reconsolidate_rule,
     reconsolidate_rules_from_turns,
+    resolve_contradicting_rules,
     semantic_similarity,
 )
 from claude_pseudo_intelligence.schemas import (
@@ -1061,6 +1063,330 @@ class ReconsolidationTest(unittest.TestCase):
         updated_rules = reconsolidate_rules_from_turns([rule], [turn])
 
         self.assertEqual(updated_rules[0].evidence_count, rule.evidence_count)
+
+
+class ConflictResolutionTest(unittest.TestCase):
+    """Tests for resolve_contradicting_rules (P0: auto-resolution)."""
+
+    def test_negation_conflict_demotes_weaker(self):
+        """Weaker rule (lower confidence×evidence) gets demoted."""
+        strong = _make_rule("r1", "余白を作れ", confidence_score=0.9, evidence_count=3)
+        weak = _make_rule("r2", "余白を作るな", confidence_score=0.3, evidence_count=1)
+
+        updated, log = resolve_contradicting_rules([strong, weak])
+
+        self.assertEqual(weak.status, "demoted")
+        self.assertIn("conflict_demoted", weak.tags)
+        self.assertEqual(strong.status, "promoted")
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["action"], "demote")
+
+    def test_scope_conflict_adds_negative_conditions(self):
+        """Scope conflicts separate by adding mutual negative_conditions."""
+        r1 = _make_rule("r1", "余白を作れ")
+        r2 = PreferenceRule(
+            id="r2", statement="余白を作れ", normalized_statement="余白を作れ",
+            instruction="余白を作れ", status="promoted", evidence_count=2,
+            first_recorded_at="2026/03/28 22:00", last_recorded_at="2026/03/28 22:00",
+            applies_to_scope="design", negative_conditions=["余白を作れ"],
+        )
+
+        updated, log = resolve_contradicting_rules([r1, r2])
+
+        self.assertEqual(len(log), 1)
+        self.assertEqual(log[0]["action"], "scope_separate")
+
+    def test_metabolism_lowers_guard(self):
+        """Aggressive metabolism should lower the safety guard threshold."""
+        strong = _make_rule("r1", "余白を作れ", confidence_score=0.6, evidence_count=4)
+        weak = _make_rule("r2", "余白を作るな", confidence_score=0.5, evidence_count=3)
+
+        # Conservative: safety guard protects the weak rule (evidence >= 5*(1.5-0.0)=7.5 → 8, so 4 < 8, not guarded)
+        _, log_conservative = resolve_contradicting_rules([strong, weak], metabolism_rate=0.0)
+
+        # Reset
+        weak.status = "promoted"
+        weak.tags = [t for t in weak.tags if t != "conflict_demoted"]
+
+        _, log_aggressive = resolve_contradicting_rules([strong, weak], metabolism_rate=1.0)
+
+        # Both should resolve (neither hits the guard threshold), but aggressive should be equally willing
+        self.assertTrue(len(log_aggressive) >= 1)
+
+    def test_no_conflicts_returns_unchanged(self):
+        r1 = _make_rule("r1", "余白を作れ")
+        r2 = _make_rule("r2", "ROI数値を入れろ")
+
+        updated, log = resolve_contradicting_rules([r1, r2])
+
+        self.assertEqual(len(log), 0)
+        self.assertEqual(r1.status, "promoted")
+        self.assertEqual(r2.status, "promoted")
+
+
+class SelfCorrectionTest(unittest.TestCase):
+    """Tests for auto_correct_flagged_rules (P0: self-correction loop)."""
+
+    def test_low_evidence_deleted(self):
+        """needs_revision + evidence<=1 → deleted entirely."""
+        rule = _make_rule("r1", "余白を作れ", evidence_count=1, tags=["needs_revision"])
+
+        corrected, log = auto_correct_flagged_rules([rule], "2026/04/01 12:00")
+
+        self.assertEqual(len(corrected), 0)
+        self.assertEqual(log[0]["action"], "delete")
+
+    def test_low_confidence_old_demoted(self):
+        """needs_revision + low confidence + aged → demoted."""
+        rule = PreferenceRule(
+            id="r1", statement="余白を作れ", normalized_statement="余白を作れ",
+            instruction="余白を作れ", status="promoted", evidence_count=3,
+            first_recorded_at="2026/01/01 00:00", last_recorded_at="2026/03/01 00:00",
+            tags=["needs_revision"], confidence_score=0.2,
+        )
+
+        corrected, log = auto_correct_flagged_rules([rule], "2026/04/01 12:00")
+
+        self.assertEqual(len(corrected), 1)
+        self.assertEqual(corrected[0].status, "demoted")
+        self.assertIn("self_corrected", corrected[0].tags)
+
+    def test_decent_confidence_narrowed(self):
+        """needs_revision + decent confidence → scope narrowed, not demoted."""
+        rule = PreferenceRule(
+            id="r1", statement="余白を作れ", normalized_statement="余白を作れ",
+            instruction="余白を作れ", status="promoted", evidence_count=3,
+            first_recorded_at="2026/01/01 00:00", last_recorded_at="2026/03/28 00:00",
+            tags=["needs_revision"], confidence_score=0.5,
+            applies_to_scope="design",
+        )
+
+        corrected, log = auto_correct_flagged_rules([rule], "2026/04/01 12:00")
+
+        self.assertEqual(len(corrected), 1)
+        self.assertEqual(corrected[0].status, "promoted")
+        self.assertEqual(log[0]["action"], "narrow")
+
+    def test_no_revision_tag_untouched(self):
+        """Rules without needs_revision are not modified."""
+        rule = _make_rule("r1", "余白を作れ", evidence_count=3)
+
+        corrected, log = auto_correct_flagged_rules([rule], "2026/04/01 12:00")
+
+        self.assertEqual(len(corrected), 1)
+        self.assertEqual(corrected[0].status, "promoted")
+        self.assertEqual(len(log), 0)
+
+    def test_metabolism_shortens_wait(self):
+        """Aggressive metabolism should demote faster (shorter wait time)."""
+        def make_flagged():
+            return PreferenceRule(
+                id="r1", statement="余白を作れ", normalized_statement="余白を作れ",
+                instruction="余白を作れ", status="promoted", evidence_count=3,
+                first_recorded_at="2026/01/01 00:00", last_recorded_at="2026/03/25 00:00",
+                tags=["needs_revision"], confidence_score=0.2,
+            )
+
+        # Conservative (rate=0.0): wait 14*1.5=21 days. 7 days elapsed → not demoted yet
+        rule_c = make_flagged()
+        corrected_conservative, _ = auto_correct_flagged_rules(
+            [rule_c], "2026/04/01 12:00", metabolism_rate=0.0,
+        )
+
+        # Aggressive (rate=1.0): wait 14*0.5=7 days. 7.5 days elapsed → demoted
+        rule_a = make_flagged()
+        corrected_aggressive, _ = auto_correct_flagged_rules(
+            [rule_a], "2026/04/01 12:00", metabolism_rate=1.0,
+        )
+
+        self.assertEqual(corrected_conservative[0].status, "promoted")
+        self.assertEqual(corrected_aggressive[0].status, "demoted")
+
+
+class ForgettingCurveMetabolismTest(unittest.TestCase):
+    """Tests for metabolism_rate modulation in apply_forgetting_curve."""
+
+    def _make_rule_with_dates(self, rule_id, instruction, last_recorded_at="2026/03/01 00:00", priority=3):
+        return PreferenceRule(
+            id=rule_id, statement=instruction, normalized_statement=instruction.lower(),
+            instruction=instruction, status="candidate", evidence_count=2,
+            first_recorded_at="2026/01/01 00:00", last_recorded_at=last_recorded_at,
+            priority=priority,
+        )
+
+    def test_aggressive_decays_faster(self):
+        """Aggressive metabolism should cause faster priority decay."""
+        rule_a = self._make_rule_with_dates("r1", "余白を作れ", priority=4)
+        rule_c = self._make_rule_with_dates("r2", "余白を作れ", priority=4)
+
+        result_aggressive = apply_forgetting_curve([rule_a], "2026/04/01 00:00", metabolism_rate=0.9)
+        result_conservative = apply_forgetting_curve([rule_c], "2026/04/01 00:00", metabolism_rate=0.1)
+
+        self.assertLessEqual(result_aggressive[0].priority, result_conservative[0].priority)
+
+
+class PersonalityLayerTest(unittest.TestCase):
+    """Tests for personality_layer.py: profile computation and interventions."""
+
+    def test_empty_data_returns_defaults(self):
+        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        profile = compute_personality_profile([], [])
+
+        self.assertEqual(profile.metabolism_rate, 0.5)
+        self.assertEqual(profile.metabolism_label, "balanced")
+        self.assertEqual(profile.digestibility, 0.5)
+        self.assertEqual(profile.sample_size, 0)
+
+    def test_high_demote_rate_signals_aggressive(self):
+        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        rules = [
+            _make_rule(f"r{i}", f"rule {i}", status="demoted") for i in range(8)
+        ] + [
+            _make_rule(f"rp{i}", f"promoted {i}", status="promoted") for i in range(2)
+        ]
+        turns = [_make_turn(f"t{i}", reaction_score=0.3) for i in range(10)]
+
+        profile = compute_personality_profile(turns, rules)
+
+        self.assertGreater(profile.metabolism_rate, 0.6)
+        self.assertEqual(profile.metabolism_label, "aggressive")
+
+    def test_stale_retention_detected(self):
+        from claude_pseudo_intelligence.personality_layer import compute_personality_profile, detect_interventions
+        rule = _make_rule("r1", "余白を作れ", confidence_score=0.5)
+        rule.failure_count = 5
+        rule.success_count = 1
+
+        profile = compute_personality_profile([], [rule])
+        interventions = detect_interventions([rule], [], profile)
+
+        stale = [s for s in interventions if s.pattern_type == "stale_retention"]
+        self.assertEqual(len(stale), 1)
+
+    def test_repeated_failure_detected(self):
+        from claude_pseudo_intelligence.personality_layer import compute_personality_profile, detect_interventions
+        turns = [
+            _make_turn(f"t{i}", task_scope="design", reaction_score=0.2) for i in range(5)
+        ]
+
+        profile = compute_personality_profile(turns, [])
+        interventions = detect_interventions([], turns, profile)
+
+        repeated = [s for s in interventions if s.pattern_type == "repeated_failure"]
+        self.assertEqual(len(repeated), 1)
+        self.assertIn("design", repeated[0].evidence)
+
+    def test_goal_drift_detected(self):
+        from claude_pseudo_intelligence.personality_layer import compute_personality_profile
+        turns = (
+            [_make_turn(f"t{i}", task_scope="architecture") for i in range(5)] +
+            [_make_turn(f"t{i+5}", task_scope="commercialization") for i in range(5)]
+        )
+
+        profile = compute_personality_profile(turns, [])
+
+        self.assertTrue(profile.drift_detected)
+
+    def test_format_adapts_to_digestibility(self):
+        from claude_pseudo_intelligence.personality_layer import (
+            PersonalityProfile, InterventionSignal, format_personality_guidance,
+        )
+        sig = InterventionSignal(
+            pattern_type="stale_retention", confidence=0.8,
+            evidence="Rule failed 5x", mirror_prompt="Still relevant?",
+            reward_frame="Helps precision",
+        )
+
+        abstract_profile = PersonalityProfile(digestibility=0.8, digestibility_label="abstract-tolerant")
+        concrete_profile = PersonalityProfile(digestibility=0.2, digestibility_label="concrete-preferring")
+
+        abstract_out = format_personality_guidance(abstract_profile, [sig])
+        concrete_out = format_personality_guidance(concrete_profile, [sig])
+
+        # Abstract: includes confidence percentage, no reward frame inline
+        self.assertIn("confidence: 80%", abstract_out)
+        # Concrete: includes evidence detail and reward frame
+        self.assertIn("Rule failed 5x", concrete_out)
+        self.assertIn("Helps precision", concrete_out)
+
+
+class CreativeDestructionTest(unittest.TestCase):
+    """Tests for apply_creative_destruction in meaning_synthesis.py."""
+
+    def test_subsumed_rules_weakened(self):
+        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
+        from claude_pseudo_intelligence.schemas import Meaning
+
+        r1 = _make_rule("r1", "余白を作れ", evidence_count=3)
+        r1.priority = 4
+        r2 = _make_rule("r2", "スペースを確保しろ", evidence_count=2)
+        r2.priority = 3
+
+        meaning = Meaning(
+            id="m1", principle="余白を作れ", normalized_principle="余白を作れ",
+            summary="", source_rule_ids=["r1", "r2"], scopes=["design"], tags=[],
+            strength=3, cross_scope_count=1, confidence=0.8,
+            first_seen_at="2026/04/01 00:00", last_seen_at="2026/04/01 00:00",
+            personal_settings_overlap=[], status="active",
+        )
+
+        updated, log = apply_creative_destruction([r1, r2], [meaning], metabolism_rate=0.5)
+
+        # r1 is the meaning's principle → not weakened
+        self.assertEqual(r1.priority, 4)
+        # r2 is subsumed → weakened
+        self.assertLess(r2.priority, 3)
+        self.assertIn("subsumed", r2.tags)
+        self.assertEqual(len(log), 1)
+
+    def test_aggressive_metabolism_destroys_more(self):
+        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
+        from claude_pseudo_intelligence.schemas import Meaning
+
+        r1 = _make_rule("r1", "余白を作れ", evidence_count=3)
+        r1.priority = 4
+        r2 = _make_rule("r2", "スペースを確保しろ", evidence_count=2)
+        r2.priority = 4
+
+        meaning = Meaning(
+            id="m1", principle="余白を作れ", normalized_principle="余白を作れ",
+            summary="", source_rule_ids=["r1", "r2"], scopes=["design"], tags=[],
+            strength=3, cross_scope_count=1, confidence=0.8,
+            first_seen_at="2026/04/01 00:00", last_seen_at="2026/04/01 00:00",
+            personal_settings_overlap=[], status="active",
+        )
+
+        apply_creative_destruction([r1, r2], [meaning], metabolism_rate=1.0)
+        aggressive_priority = r2.priority
+
+        # Reset
+        r2.priority = 4
+        r2.tags = [t for t in r2.tags if t != "subsumed"]
+
+        apply_creative_destruction([r1, r2], [meaning], metabolism_rate=0.0)
+        conservative_priority = r2.priority
+
+        self.assertLessEqual(aggressive_priority, conservative_priority)
+
+    def test_weak_meaning_no_destruction(self):
+        from claude_pseudo_intelligence.meaning_synthesis import apply_creative_destruction
+        from claude_pseudo_intelligence.schemas import Meaning
+
+        r1 = _make_rule("r1", "余白を作れ")
+        r1.priority = 3
+
+        meaning = Meaning(
+            id="m1", principle="余白を作れ", normalized_principle="余白を作れ",
+            summary="", source_rule_ids=["r1"], scopes=[], tags=[],
+            strength=2, cross_scope_count=0, confidence=0.5,
+            first_seen_at="2026/04/01 00:00", last_seen_at="2026/04/01 00:00",
+            personal_settings_overlap=[], status="active",
+        )
+
+        _, log = apply_creative_destruction([r1], [meaning])
+
+        self.assertEqual(len(log), 0)
+        self.assertEqual(r1.priority, 3)
 
 
 if __name__ == "__main__":

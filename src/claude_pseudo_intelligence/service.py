@@ -13,7 +13,25 @@ from .learning_context import (
     get_relevant_corrections,
     get_relevant_preference_rules,
 )
+from .meaning_synthesis import (
+    apply_creative_destruction as _creative_destruction,
+    consolidate_rules_by_meaning as _consolidate_rules,
+    extract_deferred_meanings as _extract_deferred,
+    reactivate_deferred as _reactivate_deferred,
+    synthesize_meanings as _synthesize_meanings,
+    synthesize_principles as _synthesize_principles,
+)
+from dataclasses import asdict
+
 from .memory_manager import predict_next_contexts
+from .personality_layer import (
+    PersonalityProfile,
+    InterventionSignal,
+    compute_personality_profile,
+    detect_interventions,
+    format_personality_guidance,
+)
+from .schemas import Meaning, Principle
 from .mlx_trainer import MlxLoraTrainingConfig
 from .secret_store import delete_secure_secret, get_secure_secret, set_secure_secret
 from .training_dataset import export_mlx_lm_dataset
@@ -34,6 +52,7 @@ class PseudoIntelligenceService:
             backend=scorer_backend,
             model=scorer_model,
             endpoint=scorer_endpoint,
+            score_dict_path=str(self.base_dir / "score_dictionary.json"),
         )
         self.history = HistoryStore(self.base_dir, scorer=scorer)
         self.growth = GrowthTracker(self.base_dir)
@@ -182,6 +201,77 @@ class PseudoIntelligenceService:
     def rebuild_context_transitions(self):
         return self.history.rebuild_context_transitions()
 
+    def self_overcome(self) -> list[dict]:
+        """Criticize and propose improvements to own rule set.
+
+        Returns a list of proposals (demote / merge / generalize / resolve_conflict).
+        Demote proposals are automatically applied; others are surfaced for review.
+        """
+        proposals = self.history.self_overcome()
+        if not proposals:
+            return proposals
+
+        # Auto-apply demotions — low-evidence, low-confidence promoted rules
+        demote_ids = {p["rule_id"] for p in proposals if p.get("action") == "demote"}
+        if demote_ids:
+            rules = self.history.load_preference_rules()
+            changed = False
+            for rule in rules:
+                if rule.id in demote_ids and rule.status == "promoted":
+                    rule.status = "candidate"
+                    if "self_overcome_demoted" not in rule.tags:
+                        rule.tags.append("self_overcome_demoted")
+                    changed = True
+            if changed:
+                self.history.write_preference_rules(rules)
+
+        return proposals
+
+    def synthesize_rules(self) -> list[dict]:
+        """Generate rule hypotheses from success/failure pattern differences.
+
+        Returns candidate rules derived from statistical patterns.
+        These are proposals only — not automatically added to the rule store.
+        """
+        return self.history.synthesize_rules()
+
+    def synthesize_meanings(self) -> list[Meaning]:
+        rules = self.history.load_preference_rules()
+        turns = self.history.load_conversation_turns()
+        existing = self.history.load_meanings()
+        meanings = _synthesize_meanings(rules, existing)
+        self.history.write_meanings(meanings)
+
+        # Consolidate: boost strongest rule in each cluster with sibling evidence
+        _consolidate_rules(rules, meanings)
+
+        # Creative destruction: weaken rules subsumed by new meanings
+        # Generation and destruction as a single transaction (SHY)
+        # Reuse already-loaded turns+rules for personality (no double read)
+        profile = compute_personality_profile(turns, rules)
+        metabolism = profile.metabolism_rate
+        rules, _destruction_log = _creative_destruction(rules, meanings, metabolism_rate=metabolism)
+
+        # Deferred pool: extract candidates below promotion threshold
+        deferred = _extract_deferred(rules, meanings)
+        if deferred:
+            self.history.write_deferred_meanings(deferred)
+
+        self.history.write_preference_rules(rules)
+        return meanings
+
+    def list_meanings(self) -> list[Meaning]:
+        return self.history.load_meanings()
+
+    def synthesize_principles(self) -> list[Principle]:
+        meanings = self.history.load_meanings()
+        principles = _synthesize_principles(meanings)
+        self.history.write_principles(principles)
+        return principles
+
+    def list_principles(self) -> list[Principle]:
+        return self.history.load_principles()
+
     def predict_next_contexts(
         self,
         *,
@@ -261,6 +351,7 @@ class PseudoIntelligenceService:
             correction_limit=correction_limit,
             previous_context_nodes=previous_context_nodes,
             transitions=self.history.load_context_transitions(),
+            meanings=self.history.load_meanings(),
         )
 
     def analyze_conversation_guidance(
@@ -295,6 +386,7 @@ class PseudoIntelligenceService:
                 correction_limit=correction_limit,
                 previous_context_nodes=previous_context_nodes,
                 transitions=self.history.load_context_transitions(),
+                meanings=self.history.load_meanings(),
             ),
             "selected_rules": selected_rules,
             "abstained_rules": abstained_rules,
@@ -330,10 +422,76 @@ class PseudoIntelligenceService:
             raw_text=raw_text,
             previous_context_nodes=previous_context_nodes,
             transitions=self.history.load_context_transitions(),
+            meanings=self.history.load_meanings(),
         )
         if conversation_guidance:
             sections.append(conversation_guidance)
+
+        # Reactivate deferred meanings if context changed
+        self._try_reactivate_deferred(task_scope=task_scope or task_title)
+
+        # Personality layer: inject user-specific insights + interventions
+        personality_section = self._build_personality_guidance()
+        if personality_section:
+            sections.append(personality_section)
+
         return "\n\n".join(section for section in sections if section)
+
+    # ------------------------------------------------------------------
+    # Personality layer
+    # ------------------------------------------------------------------
+
+    def get_personality_profile(self) -> PersonalityProfile:
+        """Compute and persist the personality profile."""
+        profile, _ = self._compute_personality()
+        return profile
+
+    def get_interventions(self) -> list[InterventionSignal]:
+        """Detect cognitive traps the user may be falling into."""
+        _, interventions = self._compute_personality()
+        return interventions
+
+    def _compute_personality(self) -> tuple[PersonalityProfile, list[InterventionSignal]]:
+        """Shared computation for personality profile + interventions.
+
+        Loads turns and rules once, computes both, persists profile.
+        """
+        turns = self.history.load_conversation_turns()
+        rules = self.history.load_preference_rules()
+        if not turns:
+            profile = PersonalityProfile()
+            return profile, []
+        profile = compute_personality_profile(turns, rules)
+        interventions = detect_interventions(rules, turns, profile)
+        self.history.write_personality(asdict(profile))
+        return profile, interventions
+
+    def _try_reactivate_deferred(self, task_scope: str = "") -> None:
+        """Check if deferred meanings should reactivate given current context."""
+        deferred = self.history.load_deferred_meanings()
+        if not deferred:
+            return
+        # Get current context tags from recent turns
+        turns = self.history.load_conversation_turns()
+        recent_tags = []
+        for t in turns[:5]:
+            recent_tags.extend(t.tags[:5] if t.tags else [])
+        reactivated = _reactivate_deferred(deferred, task_scope, recent_tags)
+        if reactivated:
+            # Merge reactivated into active meanings
+            existing = self.history.load_meanings()
+            existing.extend(reactivated)
+            self.history.write_meanings(existing)
+            # Remove from deferred pool
+            remaining = [d for d in deferred if d.status == "deferred"]
+            self.history.write_deferred_meanings(remaining)
+
+    def _build_personality_guidance(self) -> str:
+        """Build personality-aware guidance for injection into context."""
+        profile, interventions = self._compute_personality()
+        if profile.sample_size < 5:
+            return ""
+        return format_personality_guidance(profile, interventions)
 
     # ------------------------------------------------------------------
     # Growth measurement

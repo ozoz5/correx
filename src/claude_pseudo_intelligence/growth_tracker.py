@@ -294,11 +294,11 @@ class GrowthTracker:
     # ------------------------------------------------------------------
 
     def _save(self, record: GrowthRecord) -> None:
-        path = self.growth_dir / f"{record.record_id}.json"
-        path.write_text(
-            json.dumps(self._serialize(record), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        target = self.growth_dir / f"{record.record_id}.json"
+        tmp = target.with_suffix(".tmp")
+        content = json.dumps(self._serialize(record), ensure_ascii=False, indent=2)
+        tmp.write_text(content, encoding="utf-8")
+        tmp.replace(target)
 
     def _serialize(self, record: GrowthRecord) -> dict:
         return {
