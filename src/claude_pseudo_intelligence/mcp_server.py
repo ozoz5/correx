@@ -542,8 +542,7 @@ def create_mcp_server(
 
         Also returns any detected intervention signals (cognitive traps).
         """
-        profile = service.get_personality_profile()
-        interventions = service.get_interventions()
+        profile, interventions = service._compute_personality()
         return {
             "profile": {
                 "metabolism_rate": profile.metabolism_rate,
