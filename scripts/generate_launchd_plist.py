@@ -10,7 +10,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a launchd plist for nightly auto-training.")
-    parser.add_argument("--output-plist", default=str(ROOT_DIR / "launchd" / "com.claude-pseudo-intelligence.auto-train.plist"))
+    parser.add_argument("--output-plist", default=str(ROOT_DIR / "launchd" / "com.correx.auto-train.plist"))
     parser.add_argument("--memory-dir", default=str(ROOT_DIR / ".local-memory"))
     parser.add_argument("--artifacts-dir", default=str(ROOT_DIR / "training_artifacts"))
     parser.add_argument("--model", required=True)
@@ -54,7 +54,7 @@ def build_plist(args: argparse.Namespace) -> dict:
         program_arguments.append("--dry-run")
 
     return {
-        "Label": "com.claude-pseudo-intelligence.auto-train",
+        "Label": "com.correx.auto-train",
         "ProgramArguments": program_arguments,
         "WorkingDirectory": str(ROOT_DIR),
         "RunAtLoad": False,
