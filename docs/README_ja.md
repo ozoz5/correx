@@ -1,228 +1,105 @@
-# Claude Pseudo Intelligence Core
+# CORREX
 
-Claude や他の LLM フロントエンドから使うために、擬似知性の最小核だけを切り出したフォルダです。
+Claude や他の LLM フロントエンドから使うための MCP サーバーです。
+あなたの修正が蓄積され、ルールになり、次の生成に注入されます。
 
-入っているものは5つだけです。
+> **Engram エンジン**搭載 — 実際のやりとりから行動パターンを抽出し、Rules → Meanings → Principles に昇格、次のセッション前に注入します。
 
-- `HistoryStore`
-  - タスク結果を episode として保存する
-- `Correction memory`
-  - 人間の手直しを `decision_override / correction_note / reuse_note` として保存する
-- `Conversation memory`
-  - 会話の中で出た修正を `ConversationTurn` として保存し、繰り返された指摘を `PreferenceRule` に昇格する
-- `Learning context`
-  - 過去の correction と会話由来の preference rule から、今回に近い補正だけを抽出して prompt へ返す
-- `Secret store`
-  - macOS なら Keychain に秘密を保存する
-- `Training dataset / auto-train`
-  - 人間が確定した最終出力を教師データ化し、`mlx-lm` 用 JSONL と自動 LoRA 学習サイクルを回せる
+## 入っているもの
+
+- `HistoryStore` — 会話・修正・エピソードの永続化
+- `Engram engine` — ルール昇格・矛盾解消・自己超克
+- `PersonalityLayer` — 行動プロファイル（metabolism_rate, reward_pattern など）
+- `MCP server` — Claude Code / Claude Desktop から直接使える
+- `Training dataset / auto-train` — accepted な出力を教師データ化し、`mlx-lm` で LoRA 学習
 
 ## 使い方
 
 ```bash
-cd /path/to/correx
-python3 -m pip install -e .
-python3 examples/basic_usage.py
+git clone https://github.com/ozoz5/correx
+cd correx
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[mcp]"
 ```
 
-## MCP サーバー化
-
-このコアは `FastMCP` ベースの tool-only MCP server として動かせます。
-
-まず依存を入れます。
+## Claude Code への追加
 
 ```bash
-python3 -m pip install -e '.[mcp]'
-```
-
-stdio:
-
-```bash
-python3 scripts/run_mcp_server.py \
-  --memory-dir /path/to/correx/.local-memory \
+claude mcp add pseudo-intelligence \
+  -s user \
+  -- /path/to/correx/.venv/bin/python \
+  -m claude_pseudo_intelligence \
+  --memory-dir ~/.pseudo-intelligence \
   --transport stdio
 ```
 
-streamable HTTP:
+## Claude Desktop への追加
 
-```bash
-python3 scripts/run_mcp_server.py \
-  --memory-dir /path/to/correx/.local-memory \
-  --transport streamable-http \
-  --host 127.0.0.1 \
-  --port 8000 \
-  --path /mcp
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "pseudo-intelligence": {
+      "command": "/path/to/correx/.venv/bin/python",
+      "args": [
+        "-m", "claude_pseudo_intelligence",
+        "--memory-dir", "/Users/you/.pseudo-intelligence",
+        "--transport", "stdio"
+      ]
+    }
+  }
+}
 ```
 
-主な tool:
+> **命名について:** リポジトリ名は `correx`、Python パッケージは `claude_pseudo_intelligence`、MCP サーバー登録名は `pseudo-intelligence` です。将来のリリースで統一します。
 
-- `build_guidance_context`
-- `save_episode`
-- `save_correction`
-- `save_conversation_turn`
-- `save_training_example`
-- `list_entries`
-- `list_conversation_turns`
-- `list_preference_rules`
-- `export_training_dataset`
-- `run_auto_training_cycle`
+## 主な MCP ツール
 
-主な resource:
-
-- `memory://summary`
-- `memory://entries/{limit}`
-- `memory://guidance/{task_scope}`
-
-## Claude での使い方
-
-Claude 自体に学習させるのではなく、このサービスを外部状態として使わせます。
-
-1. Claude がタスクを受ける
-2. `build_guidance_context()` で過去補正を引く
-3. その文脈を Claude の prompt に差し込む
-4. 出力後に `save_episode()` で保存する
-5. 人間が直したら `save_correction()` を呼ぶ
-6. 会話で出た修正は `save_conversation_turn()` で残す
-
-## Thin CLI adapter
-
-MCP の前に、対話ループへ噛ませる薄い adapter も入っています。
-
-```bash
-python3 scripts/chat_adapter.py --memory-dir /path/to/correx/.local-memory \
-  prepare \
-  --task-scope "service design" \
-  --task-title "B2Bサービスのトップ設計" \
-  --raw-text "業務サービスのトップ画面を整理する" \
-  --user-message "提案サービスのトップを作れ"
-```
-
-次に corrective feedback を保存します。
-
-```bash
-python3 scripts/chat_adapter.py --memory-dir /path/to/correx/.local-memory \
-  feedback \
-  --session-id chat-xxxxxxxxxxxx \
-  --user-message "トップをもっと整理しろ" \
-  --assistant-message "情報を詰め込みすぎたトップを出した" \
-  --user-feedback "情報量が多すぎる。余白を作れ。"
-```
-
-最後に accepted output を保存します。
-
-```bash
-python3 scripts/chat_adapter.py --memory-dir /path/to/correx/.local-memory \
-  accept \
-  --session-id chat-xxxxxxxxxxxx \
-  --task-type ui_design \
-  --user-message "余白を強くした案を確定する" \
-  --assistant-message "情報を詰め込みすぎたトップを出した" \
-  --accepted-output "余白を強くしたトップを出した" \
-  --feedback "説明を削って余白を優先した"
-```
-
-## 学習データ化
-
-外部記憶として使うだけでなく、accepted な最終出力を教師データとして蓄積できます。
-
-```python
-entry = service.save_episode(
-    title="自治体システム移行支援業務",
-    issuer="東京都",
-    task_type="tender",
-    source_text=source_text,
-    output={"decision": "条件付き参加"},
-)
-
-service.save_training_example(
-    entry.id,
-    system_message="You are a bid analyst.",
-    user_message="自治体案件の参加判断を書け。",
-    draft_output="参加推奨",
-    accepted_output="条件付き参加。移行体制を主軸に判断する。",
-    feedback="価格訴求ではなく移行体制を前に出す",
-)
-```
-
-`accepted_output` を省略した場合は、`episode.output` を教師として使います。`rejected_output` も保存しておくと、将来 `DPO/ORPO` 系の preference 学習へ回せます。
-
-## MLX-LM 用データセット出力
-
-```bash
-python3 scripts/export_training_dataset.py \
-  --memory-dir /path/to/correx/.local-memory \
-  --output-dir /path/to/correx/training_artifacts/dataset
-```
-
-出力は `train.jsonl` / `valid.jsonl` / `test.jsonl` / `preference.jsonl` / `manifest.json` です。既定の split は `chronological` です。
-
-## 自動学習サイクル
-
-まず訓練依存を入れます。
-
-```bash
-python3 -m pip install -e '.[train]'
-```
-
-dry-run:
-
-```bash
-python3 scripts/auto_train.py \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-  --memory-dir /path/to/correx/.local-memory \
-  --output-dir /path/to/correx/training_artifacts \
-  --minimum-new-examples 4 \
-  --dry-run
-```
-
-実行:
-
-```bash
-python3 scripts/auto_train.py \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-  --memory-dir /path/to/correx/.local-memory \
-  --output-dir /path/to/correx/training_artifacts \
-  --minimum-new-examples 4
-```
-
-これで accepted な episode からデータセットを作り、`mlx_lm.lora` を呼んで adapter を生成します。
-
-## launchd 連携
-
-夜間に自動で回す plist を生成できます。
-
-```bash
-python3 scripts/generate_launchd_plist.py \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
-  --hour 3 \
-  --minute 15
-```
-
-生成後は必要に応じて `launchctl load <plist>` で読み込みます。
-
-## 最小 prompt contract
-
-Claude に毎回渡すのは長い手順書ではなく、次の4点で足ります。
-
-- current task title
-- issuer / domain
-- source text
-- guidance context
+- `build_guidance_context` — 蓄積ルールをコンテキストに注入
+- `save_conversation_turn` — 修正・承認を記録
+- `rebuild_preference_rules` — パターンをルールに昇格
+- `synthesize_meanings` — ルール群から深いパターンを抽出
+- `synthesize_principles` — Meanings から原則を蒸留
+- `get_personality_profile` — 行動プロファイルと自己超克提案
+- `synthesize_rules` — 成功/失敗パターンからルール仮説を生成
+- `record_growth` — 品質改善の前後を記録
+- `save_correction` — 手直しを記録
+- `save_episode` — タスク結果を保存
 
 ## フォルダ構成
 
-- `src/claude_pseudo_intelligence/service.py`
-  - 外から使う入口
-- `src/claude_pseudo_intelligence/history_store.py`
-  - episode / correction 永続化
-- `src/claude_pseudo_intelligence/learning_context.py`
-  - 類似 correction の抽出と prompt 文脈生成
-- `src/claude_pseudo_intelligence/conversation_learning.py`
-  - 会話修正の抽出と preference rule 昇格
-- `src/claude_pseudo_intelligence/secret_store.py`
-  - Keychain 連携
+```
+correx/
+  src/claude_pseudo_intelligence/
+    mcp_server.py          # MCP ツール定義
+    service.py             # コアサービス層
+    history_store.py       # 永続化 + I/O オーケストレーション
+    rule_builder.py        # 純粋なルール構築ロジック（I/O なし）
+    memory_manager.py      # 矛盾解消・自己補正
+    meaning_synthesis.py   # Engram: Rules → Meanings → Principles
+    personality_layer.py   # 行動プロファイリング
+    llm_scorer.py          # 反応スコアリング（Anthropic API / ルールベース）
+  tests/                   # 90 テスト通過
+```
+
+全データは `~/.pseudo-intelligence/` に JSON で保存。データベース不要。
+
+## LoRA 学習（オプション）
+
+```bash
+pip install -e ".[train]"
+
+python3 scripts/auto_train.py \
+  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit \
+  --memory-dir ~/.pseudo-intelligence \
+  --output-dir ./training_artifacts
+```
 
 ## 意図
 
-これは Claude 専用の prompt 集ではありません。  
-**Claude が使う知性OSの核**です。
+これは Claude 専用の prompt 集ではありません。
+**Claude が使う知性 OS の核**です。
+
+AGI が万人のための汎用知性なら、CORREX は一人のための超越知性。
