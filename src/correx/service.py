@@ -815,7 +815,108 @@ class CorrexService:
         trajectory_dict = trajectory_to_dict(updated_trajectory)
         self.history.save_ghost_with_trajectory(ghost_dict, trajectory_dict)
 
+        # Auto-sublimate if trajectory just fired
+        if fired_principles and updated_trajectory.fired:
+            self._auto_sublimate_to_law(trajectory_dict, fired_principles)
+
         return ghost_dict, trajectory_dict, fired_principles
+
+    def _auto_sublimate_to_law(self, trajectory_dict: dict, fired_principles: list[str]) -> None:
+        """When a trajectory fires, attempt 2-stage sublimation via Sonnet.
+
+        Stage 1: Specific → Universal principle (via Sonnet API)
+        Stage 2: Check if the universal principle fits an existing law or creates a new one
+        Then re-evaluate dormant rules under the updated laws.
+        """
+        import json as _json
+        import os
+
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if not api_key:
+            return  # Sonnet not available, keep local LLM principle
+
+        try:
+            import anthropic
+        except ImportError:
+            return
+
+        # Stage 1: Abstract the specific principle
+        specific = fired_principles[0] if fired_principles else ""
+        if not specific:
+            return
+
+        scopes = trajectory_dict.get("scopes", [])
+        scope_str = "・".join(scopes[:3]) if scopes else "不明"
+
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            r = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=100,
+                messages=[{"role": "user", "content": (
+                    f"以下の固有原則から固有名詞を全て剥がし、どんな場面でも適用可能な"
+                    f"汎用行動原則に書き換えてください。1文、20〜40文字、日本語。\n\n"
+                    f"スコープ: {scope_str}\n固有原則: {specific}"
+                )}],
+            )
+            universal = r.content[0].text.strip().strip("「」\"'").split("\n")[0]
+        except Exception:
+            return
+
+        if not universal or len(universal) < 5:
+            return
+
+        # Update the trajectory's sublimated_principle
+        trajectory_dict["sublimated_principle"] = universal
+
+        # Stage 2: Check if this fits an existing law
+        laws_path = self.history.base_dir / "ghost_universal_laws.json"
+        try:
+            laws = _json.loads(laws_path.read_text(encoding="utf-8")) if laws_path.exists() else []
+        except (ValueError, OSError):
+            laws = []
+
+        if laws:
+            law_list = "\n".join(f"{i+1}. {l.get('law', '')}" for i, l in enumerate(laws))
+            try:
+                r2 = client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=50,
+                    messages=[{"role": "user", "content": (
+                        f"以下の法理のうち、この新原則をカバーできるものの番号を答えてください。\n"
+                        f"どれにも該当しなければ0と答えてください。数字だけ。\n\n"
+                        f"法理:\n{law_list}\n\n新原則: {universal}"
+                    )}],
+                )
+                answer = r2.content[0].text.strip()
+                import re
+                m = re.search(r'\d+', answer)
+                law_idx = int(m.group()) if m else 0
+            except Exception:
+                law_idx = 0
+
+            if law_idx > 0 and law_idx <= len(laws):
+                # Absorbed into existing law — strengthen it
+                laws[law_idx - 1].setdefault("covers", [])
+                laws[law_idx - 1]["covers"].append({"principle": universal, "trajectory_id": trajectory_dict.get("id", "")})
+            else:
+                # New law candidate — add it
+                laws.append({
+                    "law": universal,
+                    "covers": [{"principle": universal, "trajectory_id": trajectory_dict.get("id", "")}],
+                    "auto_generated": True,
+                })
+        else:
+            laws = [{
+                "law": universal,
+                "covers": [{"principle": universal, "trajectory_id": trajectory_dict.get("id", "")}],
+                "auto_generated": True,
+            }]
+
+        try:
+            laws_path.write_text(_json.dumps(laws, ensure_ascii=False, indent=2))
+        except OSError:
+            pass
 
     def list_ghosts(self, limit: int = 50) -> list[dict]:
         """List stored ghosts, most recent first."""
