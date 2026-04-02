@@ -918,6 +918,46 @@ class CorrexService:
         except OSError:
             pass
 
+        # Re-evaluate dormant rules: new/strengthened law may cover more rules
+        self._refresh_dormant_from_laws(laws, universal)
+
+    def _refresh_dormant_from_laws(self, laws: list[dict], new_principle: str) -> None:
+        """After a law is added or strengthened, check if candidate rules should sleep."""
+        import json as _json
+
+        rules_path = self.history.base_dir / "preference_rules.json"
+        if not rules_path.exists():
+            return
+        try:
+            data = _json.loads(rules_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError, UnicodeDecodeError):
+            return
+
+        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        candidates = [r for r in items if r.get("status") == "candidate"]
+        if not candidates:
+            return
+
+        # Simple word-overlap check: if the new principle shares 3+ content words
+        # with a candidate rule, that rule is now covered
+        new_words = set(new_principle.lower())
+        dormanted = 0
+        for rule in candidates:
+            instruction = (rule.get("instruction", "") or rule.get("statement", "")).lower()
+            rule_words = set(instruction)
+            if len(new_words & rule_words) >= 3:
+                rule["status"] = "dormant"
+                rule["dormant_law"] = new_principle
+                dormanted += 1
+
+        if dormanted > 0:
+            if isinstance(data, dict):
+                data["items"] = items
+            try:
+                rules_path.write_text(_json.dumps(data, ensure_ascii=False, indent=2))
+            except OSError:
+                pass
+
     def list_ghosts(self, limit: int = 50) -> list[dict]:
         """List stored ghosts, most recent first."""
         ghosts = self.history.load_ghosts()
