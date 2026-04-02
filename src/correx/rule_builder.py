@@ -413,7 +413,10 @@ def build_preference_rules(
         ),
         reverse=True,
     )
-    return rules[:100]
+    # Keep all promoted rules + top 200 candidates by score
+    promoted = [r for r in rules if r.status == "promoted"]
+    candidates = [r for r in rules if r.status != "promoted"][:200]
+    return promoted + candidates
 
 
 def synthesize_rules_from_turns(turns: list[ConversationTurn]) -> list[dict]:

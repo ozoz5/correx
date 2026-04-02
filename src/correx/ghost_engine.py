@@ -442,10 +442,12 @@ def _sublimate_with_llm(
             with urllib.request.urlopen(tags_req, timeout=3) as tags_resp:
                 tags = _json.loads(tags_resp.read())
                 available = [m["name"] for m in tags.get("models", [])]
+                if not available:
+                    return ""  # no models at all — fall back to template
                 if model not in available:
-                    model = available[0] if available else "qwen2.5:1.5b"
+                    model = available[0]
         except (urllib.error.URLError, OSError, KeyError, _json.JSONDecodeError):
-            pass
+            pass  # assume default model, will fail gracefully below
 
         body = _json.dumps({
             "model": model,

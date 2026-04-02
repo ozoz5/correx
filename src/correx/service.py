@@ -150,7 +150,64 @@ class CorrexService:
         if auto_record_growth:
             turns = self.history.load_conversation_turns()
             self.growth.auto_record_from_turns(turns)
+
+        # Awaken dormant rules if correction hits a law-covered scope
+        reaction_score = getattr(turn, "reaction_score", None)
+        if reaction_score is not None and reaction_score < 0.5:
+            self._awaken_dormant_rules(turn)
+
         return turn
+
+    def _awaken_dormant_rules(self, turn) -> None:
+        """Wake dormant rules when anger recurs in a law-covered area.
+
+        If a correction comes in with low reaction_score (anger) and the
+        correction text overlaps with a dormant rule's instruction,
+        the law wasn't enough — wake the specific rule.
+        """
+        import json as _json
+
+        rules_path = self.history.base_dir / "preference_rules.json"
+        if not rules_path.exists():
+            return
+
+        try:
+            data = _json.loads(rules_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError, UnicodeDecodeError):
+            return
+
+        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        dormant = [r for r in items if r.get("status") == "dormant"]
+        if not dormant:
+            return
+
+        # Build correction text from this turn
+        corrections = getattr(turn, "extracted_corrections", []) or []
+        feedback = getattr(turn, "user_feedback", "") or ""
+        scope = getattr(turn, "task_scope", "") or ""
+        signal = " ".join(corrections + [feedback, scope]).lower()
+
+        awakened = 0
+        for rule in dormant:
+            instruction = (rule.get("instruction", "") or rule.get("statement", "")).lower()
+            # Check if the anger overlaps with this dormant rule's domain
+            # Simple word overlap check (3+ shared content words)
+            rule_words = set(w for w in instruction if len(w) > 2)
+            signal_words = set(w for w in signal if len(w) > 2)
+            overlap = len(rule_words & signal_words)
+            if overlap >= 3 or scope == rule.get("applies_to_scope", ""):
+                rule["status"] = "candidate"
+                rule.pop("dormant_law_index", None)
+                rule.pop("dormant_law", None)
+                awakened += 1
+
+        if awakened > 0:
+            if isinstance(data, dict):
+                data["items"] = items
+            try:
+                rules_path.write_text(_json.dumps(data, ensure_ascii=False, indent=2))
+            except OSError:
+                pass
 
     def save_training_example(
         self,
@@ -528,7 +585,9 @@ class CorrexService:
                 if laws:
                     law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
                     for i, law in enumerate(laws, 1):
-                        law_lines.append(f"  {i}. {law['law']}")
+                        text = law.get("law", "") if isinstance(law, dict) else str(law)
+                        if text:
+                            law_lines.append(f"  {i}. {text}")
                     sections.append("\n".join(law_lines))
                     has_laws = True
             except (ValueError, OSError, KeyError, UnicodeDecodeError):
@@ -542,7 +601,9 @@ class CorrexService:
                 if pos_laws:
                     pos_lines = ["[推奨法理 — 肯定反応から抽出された推進基準]"]
                     for i, law in enumerate(pos_laws, 1):
-                        pos_lines.append(f"  +{i}. {law['law']}")
+                        text = law.get("law", "") if isinstance(law, dict) else str(law)
+                        if text:
+                            pos_lines.append(f"  +{i}. {text}")
                     sections.append("\n".join(pos_lines))
                     has_positive = True
             except (ValueError, OSError, KeyError, UnicodeDecodeError):

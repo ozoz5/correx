@@ -369,6 +369,8 @@ def get_relevant_preference_rules(
     for rule in rules:
         if not rule.statement:
             continue
+        if rule.status == "dormant":
+            continue  # dormant rules are covered by laws, skip until awakened
         score, reason, snapshot = _score_preference_rule(
             rule,
             task_scope=current_scope,
