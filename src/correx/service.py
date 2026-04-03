@@ -958,6 +958,109 @@ class CorrexService:
             except OSError:
                 pass
 
+    # ------------------------------------------------------------------
+    # Contextual feedback collection
+    # ------------------------------------------------------------------
+
+    def generate_session_feedback_question(
+        self,
+        task_scope: str = "",
+        task_title: str = "",
+        corrections_this_session: int = 0,
+        guidance_was_injected: bool = False,
+    ) -> dict:
+        """Generate a natural feedback question based on what happened this session.
+
+        Returns a dict with 'question' and 'options' that the AI should present
+        to the user at the end of a session. The question is tailored to the
+        task context — never mentions laws, rules, or system internals.
+        """
+        # Only ask when guidance was actually injected
+        if not guidance_was_injected:
+            return {"ask": False}
+
+        # Build question from task context
+        scope_questions = {
+            "dashboard_development": "今回のダッシュボード作業",
+            "correx_development": "今回の開発作業",
+            "document_creation": "今回のドキュメント作成",
+            "proposal_summary": "今回の提案書",
+            "commercialization": "今回のビジネス検討",
+            "game_development": "今回のゲーム開発",
+        }
+
+        task_label = scope_questions.get(task_scope, "")
+        if not task_label and task_title:
+            task_label = f"今回の「{task_title[:20]}」"
+        if not task_label:
+            task_label = "今回の作業"
+
+        if corrections_this_session == 0:
+            question = f"{task_label}、スムーズだった？"
+        elif corrections_this_session <= 2:
+            question = f"{task_label}、前よりやり直し減った？"
+        else:
+            question = f"{task_label}、手間取った？"
+
+        return {
+            "ask": True,
+            "question": question,
+            "options": ["スムーズだった", "いつも通り", "手間取った"],
+            "context": {
+                "task_scope": task_scope,
+                "task_title": task_title,
+                "corrections_this_session": corrections_this_session,
+                "guidance_injected": True,
+            },
+        }
+
+    def save_session_feedback(
+        self,
+        answer: str,
+        task_scope: str = "",
+        task_title: str = "",
+        corrections_this_session: int = 0,
+    ) -> dict:
+        """Save the user's session feedback as a growth measurement.
+
+        Maps answer to a score:
+          'スムーズだった' → 1.0 (guidance helped)
+          'いつも通り' → 0.5 (no change)
+          '手間取った' → 0.0 (guidance didn't help or hurt)
+        """
+        import json as _json
+        from datetime import datetime
+
+        score_map = {
+            "スムーズだった": 1.0,
+            "smooth": 1.0,
+            "いつも通り": 0.5,
+            "normal": 0.5,
+            "手間取った": 0.0,
+            "struggled": 0.0,
+        }
+        score = score_map.get(answer, 0.5)
+
+        record = {
+            "type": "session_feedback",
+            "recorded_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "task_scope": task_scope,
+            "task_title": task_title,
+            "answer": answer,
+            "score": score,
+            "corrections_this_session": corrections_this_session,
+            "guidance_injected": True,
+        }
+
+        # Save to growth directory
+        growth_dir = self.history.base_dir / "growth"
+        growth_dir.mkdir(exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = growth_dir / f"feedback-{ts}.json"
+        filepath.write_text(_json.dumps(record, ensure_ascii=False, indent=2))
+
+        return record
+
     def list_ghosts(self, limit: int = 50) -> list[dict]:
         """List stored ghosts, most recent first."""
         ghosts = self.history.load_ghosts()

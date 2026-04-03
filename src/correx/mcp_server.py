@@ -1215,6 +1215,51 @@ def create_mcp_server(
             "total_turns_now": len(existing_ids),
         }
 
+    @mcp.tool()
+    def generate_session_feedback(
+        task_scope: str = "",
+        task_title: str = "",
+        corrections_this_session: int = 0,
+        guidance_was_injected: bool = False,
+    ) -> dict[str, Any]:
+        """Generate a natural feedback question for the end of a session.
+
+        Call this at session end when meaningful work was completed.
+        The question is tailored to the task context and never mentions
+        internal system concepts (laws, rules, ghosts).
+
+        Present the returned question and options to the user, then call
+        save_session_feedback with their answer.
+        """
+        return service.generate_session_feedback_question(
+            task_scope=task_scope,
+            task_title=task_title,
+            corrections_this_session=corrections_this_session,
+            guidance_was_injected=guidance_was_injected,
+        )
+
+    @mcp.tool()
+    def save_session_feedback(
+        answer: str,
+        task_scope: str = "",
+        task_title: str = "",
+        corrections_this_session: int = 0,
+    ) -> dict[str, Any]:
+        """Save the user's session feedback response.
+
+        Call after the user answers the feedback question from
+        generate_session_feedback. Maps their response to a growth score
+        and persists it for quantitative analysis.
+
+        answer should be one of: 'スムーズだった', 'いつも通り', '手間取った'
+        """
+        return service.save_session_feedback(
+            answer=answer,
+            task_scope=task_scope,
+            task_title=task_title,
+            corrections_this_session=corrections_this_session,
+        )
+
     return mcp
 
 
