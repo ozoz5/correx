@@ -263,6 +263,113 @@ class GhostTrajectory:
 
 
 @dataclass(slots=True)
+class Policy:
+    """A deep, interpretable knowledge unit derived from accumulated rules/ghosts.
+
+    Unlike rules (literal, single-use) or laws (constraint-only),
+    a policy carries enough context to enable analogy, extension,
+    inversion, and boundary detection in novel situations.
+
+    Maturity lifecycle: rules accumulate → cluster detected → policy proposed → user approves.
+    Once a policy is active, its source rules become dormant (not deleted).
+    """
+    id: str
+    title: str                          # short name e.g. "理解が行動に先行する"
+    core: str                           # one-line essence
+    why: str                            # reasoning / motivation
+    analogy: str = ""                   # how to extend by analogy
+    opposite: str = ""                  # when NOT to apply / inverse
+    limits: str = ""                    # boundary conditions
+    source_rule_ids: list[str] = field(default_factory=list)
+    source_ghost_ids: list[str] = field(default_factory=list)
+    source_law_ids: list[str] = field(default_factory=list)
+    scopes: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    evidence_count: int = 0             # how many raw data points support this
+    maturity: str = "proposed"          # "proposed" | "active" | "superseded"
+    created_at: str = ""
+    updated_at: str = ""
+    approved_by: str = ""               # "user" | "auto" | ""
+
+
+@dataclass(slots=True)
+class CuriositySignal:
+    """A question detected by the client LLM from user messages.
+
+    The Curiosity Layer is the third learning layer — it operates upstream
+    of corrections (Surface Layer) and anger (Ghost Layer) by detecting
+    when users ask questions, classifying those questions, and tracking
+    knowledge gaps.
+
+    Causal chain intercepted: question → repetition → resignation → anger → abandonment.
+
+    The client LLM (not the server) handles detection and classification.
+    The server handles persistence and clustering.
+    """
+    id: str
+    created_at: str
+
+    # The question extracted by the client LLM
+    question_text: str = ""
+
+    # Classification by client LLM
+    # "knowledge_gap":          user doesn't know → teach
+    # "judgment_uncertainty":   user knows but can't decide → provide criteria
+    # "confirmation_seeking":   user knows but wants reassurance → confirm facts
+    question_type: str = ""
+
+    # "self":  user is asking for themselves (「わかりやすく教えて」)
+    # "other": user is asking to translate for someone else (「わかりやすくまとめて」)
+    target: str = "self"
+
+    # Context
+    source_turn_id: str = ""
+    task_scope: str = ""
+    tags: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+
+    # Client LLM's classification confidence (0.0-1.0)
+    confidence: float = 0.0
+
+    # Cluster linkage (filled when assigned)
+    cluster_id: str = ""
+
+
+@dataclass(slots=True)
+class KnowledgeGapCluster:
+    """A cluster of related questions in the same scope.
+
+    Analogous to GhostTrajectory: individual questions are noise,
+    but repeated questions in the same scope = knowledge gap signal.
+
+    Escalation score rises with repeat count and signal density.
+    When escalation is high, the client LLM should intervene proactively.
+    """
+    id: str
+    created_at: str
+    updated_at: str
+
+    # Cluster definition
+    scope: str = ""
+    theme_keywords: list[str] = field(default_factory=list)
+    dominant_type: str = ""          # most frequent question_type
+
+    # Signal tracking
+    signal_ids: list[str] = field(default_factory=list)
+    signal_count: int = 0
+    repeat_count: int = 0            # how many times similar questions recur
+
+    # Escalation (0.0=calm, 1.0=about to give up)
+    escalation_score: float = 0.0
+    gap_strength: float = 0.0
+
+    # Lifecycle
+    status: str = "open"             # "open" | "resolved" | "escalated"
+    resolved_at: str = ""
+    scopes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class EpisodeRecord:
     id: str
     timestamp: str

@@ -28,7 +28,7 @@ from .schemas import ConversationTurn, PreferenceRule
 
 @dataclass(slots=True)
 class PersonalityProfile:
-    """The 5-parameter personality layer for a single user."""
+    """The 6-parameter personality layer for a single user."""
 
     # 1. Metabolism: ratio of attack vs defense (0.0=very conservative, 1.0=very aggressive)
     metabolism_rate: float = 0.5
@@ -51,6 +51,11 @@ class PersonalityProfile:
     objective_confidence: float = 0.0
     drift_detected: bool = False
     drift_description: str = ""
+
+    # 6. Curiosity: density of questions / exploratory behavior
+    # 0.0=pragmatic (just wants results), 1.0=intellectually curious (asks why)
+    curiosity_level: float = 0.5
+    curiosity_label: str = "moderate"
 
     # Meta
     sample_size: int = 0
@@ -304,6 +309,7 @@ def detect_interventions(
     rules: list[PreferenceRule],
     turns: list[ConversationTurn],
     profile: PersonalityProfile,
+    escalated_clusters: list[dict] | None = None,
 ) -> list[InterventionSignal]:
     """Detect cognitive patterns that may cause failure.
 
@@ -362,14 +368,61 @@ def detect_interventions(
             reward_frame="Clarifying the current goal prevents scattered effort",
         ))
 
+    # Pattern 5: Knowledge gap warning — escalated curiosity clusters
+    if escalated_clusters:
+        for cluster in escalated_clusters:
+            scope = cluster.get("scope", "")
+            signal_count = cluster.get("signal_count", 0)
+            keywords = cluster.get("theme_keywords", [])[:3]
+            kw_str = ", ".join(keywords) if keywords else scope
+            if signal_count >= 2:
+                signals.append(InterventionSignal(
+                    pattern_type="knowledge_gap_warning",
+                    confidence=min(0.9, 0.4 + signal_count * 0.1),
+                    evidence=f"User asked about '{kw_str}' {signal_count} times in scope '{scope}'",
+                    mirror_prompt=f"You've asked about '{kw_str}' multiple times. Would a foundational explanation help?",
+                    reward_frame=f"Clarifying '{kw_str}' prevents repeated misunderstandings",
+                ))
+
     return signals
 
 
 # ── Main API ─────────────────────────────────────────────────────────────────
 
+def _estimate_curiosity(
+    curiosity_signals: list[dict] | None = None,
+    turns: list[ConversationTurn] | None = None,
+) -> tuple[float, str]:
+    """Estimate curiosity level from signal density.
+
+    Does NOT use regex on user messages — relies on the count of
+    CuriositySignal records saved by the client LLM.
+    Falls back to turn count if no signals available.
+    """
+    signal_count = len(curiosity_signals) if curiosity_signals else 0
+    turn_count = len(turns) if turns else 1
+
+    if signal_count == 0:
+        return 0.5, "moderate"
+
+    # Ratio of turns that had a curiosity signal
+    density = signal_count / max(turn_count, 1)
+
+    # Map to 0.0-1.0 (saturates around density=0.5)
+    level = min(1.0, density * 2.0)
+
+    if level >= 0.65:
+        return level, "intellectually-curious"
+    elif level <= 0.35:
+        return level, "pragmatic"
+    else:
+        return level, "moderate"
+
+
 def compute_personality_profile(
     turns: list[ConversationTurn],
     rules: list[PreferenceRule],
+    curiosity_signals: list[dict] | None = None,
 ) -> PersonalityProfile:
     """Compute the full personality profile from accumulated data."""
 
@@ -377,6 +430,7 @@ def compute_personality_profile(
     reward_kw, reward_pattern, avoid_kw, avoid_pattern = _extract_reward_avoidance(turns)
     digestibility, digestibility_label = _estimate_digestibility(turns)
     objective, obj_conf, drift, drift_desc = _detect_objective_drift(turns)
+    curiosity_level, curiosity_label = _estimate_curiosity(curiosity_signals, turns)
 
     return PersonalityProfile(
         metabolism_rate=metabolism_rate,
@@ -391,6 +445,8 @@ def compute_personality_profile(
         objective_confidence=obj_conf,
         drift_detected=drift,
         drift_description=drift_desc,
+        curiosity_level=curiosity_level,
+        curiosity_label=curiosity_label,
         sample_size=len(turns),
         computed_at=datetime.now().strftime("%Y/%m/%d %H:%M"),
     )
@@ -423,6 +479,8 @@ def format_personality_guidance(
 
     if profile.drift_detected:
         parts.append(f"- Goal drift detected: {profile.drift_description}")
+
+    parts.append(f"- Curiosity: {profile.curiosity_label} ({profile.curiosity_level:.2f})")
 
     # Interventions — mirror-style coaching (not rule hygiene)
     actionable = [sig for sig in interventions if sig.confidence >= 0.4]

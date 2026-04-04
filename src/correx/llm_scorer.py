@@ -324,6 +324,16 @@ class LlmScorer:
         if self._dirty_count >= 10:
             self.flush_score_dict()
 
+    def teach(self, feedback: str, corrections: list[str], score: float) -> None:
+        """Feed an externally-determined score into the dictionary cache.
+
+        Called when reaction_score_override is used, so the dictionary
+        continues learning from client LLM judgments. Without this, the
+        dictionary would starve when overrides are always provided.
+        """
+        corrections_key = "|".join(sorted(set(corrections)))[:200]
+        self._persist_score(feedback.strip().lower(), corrections_key, score, "client_override")
+
     def flush_score_dict(self) -> None:
         """Flush buffered score dictionary to disk."""
         if not self._score_dict_path or not self._score_dict:

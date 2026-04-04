@@ -627,11 +627,69 @@ def create_ghost(
 # Full ghost processing pipeline
 # ---------------------------------------------------------------------------
 
+def _sanitize_principle(text: str) -> str:
+    """Remove markdown noise, tables, and excessive formatting from principles."""
+    if not text:
+        return ""
+    # Remove markdown tables
+    text = re.sub(r"\|[^\n]*\|", "", text)
+    # Remove markdown separators
+    text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
+    # Remove markdown headers
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Remove bold/italic markers
+    text = re.sub(r"\*{1,3}([^*]+)\*{1,3}", r"\1", text)
+    # Remove backticks
+    text = re.sub(r"`([^`]*)`", r"\1", text)
+    # Remove citation-style markers
+    text = re.sub(r"\([\d]+件の.*?\)", "", text)
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    # Take first sentence only if result is too long
+    if len(text) > 80:
+        first_sentence = re.split(r"[。\n]", text)[0]
+        if first_sentence and len(first_sentence) > 5:
+            text = first_sentence
+    return text.strip()
+
+
+def _is_duplicate_principle(
+    new_principle: str,
+    existing_principles: list[str],
+    threshold: float = 0.35,
+) -> bool:
+    """Check if new principle is too similar to any existing one."""
+    if not new_principle or not existing_principles:
+        return False
+    new_ngrams = _principle_ngrams(new_principle)
+    if not new_ngrams:
+        return False
+    for existing in existing_principles:
+        existing_ngrams = _principle_ngrams(existing)
+        if not existing_ngrams:
+            continue
+        intersection = new_ngrams & existing_ngrams
+        union = new_ngrams | existing_ngrams
+        similarity = len(intersection) / len(union) if union else 0.0
+        if similarity >= threshold:
+            return True
+    return False
+
+
+def _principle_ngrams(text: str, n: int = 3) -> set[str]:
+    """Character n-grams for principle similarity comparison."""
+    text = re.sub(r"\s+", "", text.lower())
+    if len(text) < n:
+        return set()
+    return {text[i:i+n] for i in range(len(text) - n + 1)}
+
+
 def process_ghost(
     ghost: Ghost,
     trajectories: list[GhostTrajectory],
     all_ghosts: dict[str, Ghost],
     metabolism_rate: float = 0.5,
+    existing_principles: list[str] | None = None,
 ) -> tuple[Ghost, GhostTrajectory, list[str]]:
     """Process a new ghost through the full pipeline.
 
@@ -639,7 +697,7 @@ def process_ghost(
     1. Assign ghost to a trajectory (create new if needed)
     2. Add ghost to trajectory (update cumulative PE)
     3. Check if trajectory should fire
-    4. If firing: sublimate → extract principle
+    4. If firing: sublimate → extract principle (with dedup + sanitize)
 
     Returns:
     - Updated ghost (with trajectory_id set)
@@ -664,6 +722,15 @@ def process_ghost(
         # 4. Sublimate
         all_ghosts[ghost.id] = ghost  # ensure latest ghost is in dict
         principle = sublimate(trajectory, all_ghosts)
+
+        # 4a. Sanitize markdown noise
+        principle = _sanitize_principle(principle)
+
+        # 4b. Dedup against existing principles
+        all_existing = existing_principles or []
+        if principle and _is_duplicate_principle(principle, all_existing):
+            principle = ""  # suppress duplicate
+
         trajectory.sublimated_principle = principle
 
         if principle:

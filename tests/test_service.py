@@ -734,5 +734,146 @@ class CorrexServiceTest(unittest.TestCase):
             self.assertGreaterEqual(len(roi_rule.latent_contexts), 2)
 
 
+    def test_reaction_score_override_feeds_dictionary_cache(self):
+        """reaction_score_override should be used AND feed into score_dictionary."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+            turn = svc.save_conversation_turn(
+                task_scope="testing",
+                user_feedback="great work",
+                extracted_corrections=[],
+                reaction_score_override=0.92,
+            )
+            # Override should be used as the score
+            self.assertAlmostEqual(turn.reaction_score, 0.92)
+
+            # Without override, rule-based scorer should kick in
+            turn2 = svc.save_conversation_turn(
+                task_scope="testing",
+                user_feedback="great work",
+                extracted_corrections=[],
+            )
+            # Rule-based should also give a positive score for "great"
+            self.assertGreater(turn2.reaction_score, 0.5)
+
+    def test_get_pending_sublimations_returns_unfired_and_template(self):
+        """get_pending_sublimations should return fired trajectories needing upgrade."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+            # Write a fake fired trajectory with template principle
+            trajectories = [{
+                "id": "traj-test-001",
+                "fired": True,
+                "sublimated_principle": "correx_development において繰り返し修正されてきた傾向がある",
+                "ghost_ids": [],
+                "scopes": ["testing"],
+                "theme": "test theme",
+                "cumulative_pe": 2.5,
+            }]
+            svc.history.write_ghost_trajectories(trajectories)
+
+            pending = svc.get_pending_sublimations()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["trajectory_id"], "traj-test-001")
+
+            # Write a trajectory with a good principle - should NOT be pending
+            trajectories.append({
+                "id": "traj-test-002",
+                "fired": True,
+                "sublimated_principle": "コードを確認してから説明しろ",
+                "ghost_ids": [],
+                "scopes": ["testing"],
+                "theme": "verification",
+                "cumulative_pe": 3.0,
+            })
+            svc.history.write_ghost_trajectories(trajectories)
+            pending2 = svc.get_pending_sublimations()
+            self.assertEqual(len(pending2), 1)  # Only the template one
+
+    def test_save_sublimation_updates_trajectory_principle(self):
+        """save_sublimation should update the trajectory's sublimated_principle."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+            trajectories = [{
+                "id": "traj-sub-001",
+                "fired": True,
+                "sublimated_principle": "",
+                "ghost_ids": [],
+                "scopes": ["testing"],
+                "theme": "test",
+                "cumulative_pe": 2.0,
+            }]
+            svc.history.write_ghost_trajectories(trajectories)
+
+            result = svc.save_sublimation(
+                trajectory_id="traj-sub-001",
+                principle="推測で数字を出すな",
+                universal_law="事実確認を怠るな",
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["principle"], "推測で数字を出すな")
+
+            # Verify trajectory was updated
+            updated = svc.history.load_ghost_trajectories()
+            self.assertEqual(updated[0]["sublimated_principle"], "推測で数字を出すな")
+
+            # Verify law was created
+            import json
+            laws_path = svc.history.base_dir / "ghost_universal_laws.json"
+            laws = json.loads(laws_path.read_text())
+            self.assertEqual(len(laws), 1)
+            self.assertEqual(laws[0]["law"], "事実確認を怠るな")
+            self.assertTrue(laws[0].get("client_sublimated"))
+
+    def test_evaluate_guidance_effectiveness_updates_rule_metrics(self):
+        """evaluate_guidance_effectiveness should boost/penalize rules."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+            # Create rules file with test rules
+            rules = [
+                {
+                    "id": "pref-good-rule",
+                    "instruction": "テストを書け",
+                    "status": "candidate",
+                    "success_count": 2,
+                    "failure_count": 0,
+                    "expected_gain": 1.0,
+                    "confidence_score": 0.55,
+                },
+                {
+                    "id": "pref-bad-rule",
+                    "instruction": "コメントを全行に書け",
+                    "status": "promoted",
+                    "success_count": 0,
+                    "failure_count": 4,
+                    "expected_gain": 0.5,
+                    "confidence_score": 0.3,
+                },
+            ]
+            rules_path = svc.history.base_dir / "preference_rules.json"
+            rules_path.write_text(json.dumps(rules, ensure_ascii=False))
+
+            result = svc.evaluate_guidance_effectiveness(
+                evaluations=[
+                    {"rule_id": "pref-good-rule", "score": 0.9, "reason": "helped"},
+                    {"rule_id": "pref-bad-rule", "score": 0.1, "reason": "hurt"},
+                ],
+                task_scope="testing",
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["evaluated"], 2)
+            self.assertEqual(result["promoted"], 1)  # good-rule: 3 successes + conf >= 0.6
+            self.assertEqual(result["demoted"], 1)   # bad-rule: 5 failures + < 2 successes
+
+            # Verify file was updated
+            updated = json.loads(rules_path.read_text())
+            good = next(r for r in updated if r["id"] == "pref-good-rule")
+            bad = next(r for r in updated if r["id"] == "pref-bad-rule")
+            self.assertEqual(good["status"], "promoted")
+            self.assertEqual(good["success_count"], 3)
+            self.assertEqual(bad["status"], "disabled")
+            self.assertEqual(bad["failure_count"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

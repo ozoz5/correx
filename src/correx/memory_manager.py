@@ -346,7 +346,11 @@ def derive_rule_confidence_score(
     success_count: int = 0,
     failure_count: int = 0,
 ) -> float:
-    """Estimate how trustworthy a rule's learned value is."""
+    """Estimate how trustworthy a rule's learned value is.
+
+    Anti-overfitting: single-evidence rules are capped at 0.6 confidence
+    to prevent premature high-confidence from tag/scope inflation alone.
+    """
     confidence = 0.1
     confidence += min(0.42, max(0, evidence_count) * 0.11)
     confidence += min(0.18, max(0, distinct_scope_count) * 0.09)
@@ -354,7 +358,9 @@ def derive_rule_confidence_score(
     confidence += min(0.15, max(0, success_count + failure_count) * 0.05)
     if strong_signal_count > 0:
         confidence += 0.1
-    return round(min(1.0, confidence), 4)
+    # Anti-overfitting: single-evidence rules cannot exceed 0.6
+    cap = 1.0 if evidence_count >= 2 else 0.6
+    return round(min(cap, confidence), 4)
 
 
 def _aggregate_context_utility(contexts: list[RuleContext]) -> float:
@@ -398,21 +404,21 @@ def derive_rule_status(
     context_mode: str,
     expected_gain: float = 0.0,
     confidence_score: float = 0.0,
-    min_promoted_evidence: int = 2,
+    min_promoted_evidence: int = 1,
 ) -> str:
     """Keep compatibility with candidate/promoted while using contextual confidence.
 
-    Thresholds relaxed 2026-03-31 to break the circular dependency where
-    candidate rules never accumulate success signals because they were never
-    injected as guidance (which required promoted status).
+    Thresholds relaxed 2026-04-04: evidence >= 1 is enough to promote.
+    The dormancy/awakening ecosystem prevents overfitting — policies absorb
+    generic rules automatically, so the entry gate can be wide open.
     """
     if strong_signal_count >= 1 and context_mode == "local" and expected_gain >= 0.8:
         return "promoted"
-    if confidence_score >= 0.5 and expected_gain >= 1.0 and evidence_count >= 2:
+    if confidence_score >= 0.5 and expected_gain >= 1.0 and evidence_count >= 1:
         return "promoted"
-    if support_score >= 2.0 and expected_gain >= 1.0 and evidence_count >= 2:
+    if support_score >= 2.0 and expected_gain >= 1.0 and evidence_count >= 1:
         return "promoted"
-    required_evidence = max(min_promoted_evidence, 3 if context_mode == "general" else 2)
+    required_evidence = max(min_promoted_evidence, 2 if context_mode == "general" else 1)
     if evidence_count >= required_evidence and support_score >= 2.0:
         return "promoted"
     if evidence_count >= required_evidence and support_score >= 1.5 and expected_gain >= 0.8:

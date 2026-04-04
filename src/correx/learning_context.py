@@ -516,8 +516,8 @@ def build_conversation_guidance(
         previous_context_nodes=previous_context_nodes,
         transitions=transitions,
     )
-    # Promoted rules always included (no cap). Candidates capped by rule_limit.
-    promoted_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") == "promoted"]
+    # Both promoted and candidate rules are capped to avoid context flooding.
+    promoted_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") == "promoted"][:rule_limit]
     candidate_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") != "promoted"][:rule_limit]
     selected_rules = promoted_rules + candidate_rules
     relevant_turns = get_relevant_conversation_corrections(

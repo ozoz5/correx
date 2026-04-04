@@ -64,6 +64,7 @@ from .schemas import (
     LatentContext,
     LatentTransition,
     Meaning,
+    Policy,
     PreferenceRule,
     Principle,
     RuleContext,
@@ -83,8 +84,11 @@ class HistoryStore:
         self.principles_file = self.base_dir / "principles.json"
         self.personality_file = self.base_dir / "personality.json"
         self.deferred_meanings_file = self.base_dir / "deferred_meanings.json"
+        self.policies_file = self.base_dir / "policies.json"
         self.ghosts_file = self.base_dir / "ghosts.json"
         self.ghost_trajectories_file = self.base_dir / "ghost_trajectories.json"
+        self.curiosity_signals_file = self.base_dir / "curiosity_signals.json"
+        self.knowledge_gap_clusters_file = self.base_dir / "knowledge_gap_clusters.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -276,6 +280,34 @@ class HistoryStore:
             last_seen_at=str(item.get("last_seen_at", "")),
             personal_settings_overlap=list(item.get("personal_settings_overlap", [])),
             status=str(item.get("status", "active")),
+        )
+
+    def _load_policies_unlocked(self) -> list[Policy]:
+        return [self._normalize_policy(item) for item in self._read_json_list(self.policies_file)]
+
+    def _write_policies_unlocked(self, policies: list[Policy]) -> None:
+        self._atomic_write_json(self.policies_file, [asdict(p) for p in policies])
+
+    @staticmethod
+    def _normalize_policy(item: dict) -> Policy:
+        return Policy(
+            id=str(item.get("id", "")),
+            title=str(item.get("title", "")),
+            core=str(item.get("core", "")),
+            why=str(item.get("why", "")),
+            analogy=str(item.get("analogy", "")),
+            opposite=str(item.get("opposite", "")),
+            limits=str(item.get("limits", "")),
+            source_rule_ids=list(item.get("source_rule_ids", [])),
+            source_ghost_ids=list(item.get("source_ghost_ids", [])),
+            source_law_ids=list(item.get("source_law_ids", [])),
+            scopes=list(item.get("scopes", [])),
+            tags=list(item.get("tags", [])),
+            evidence_count=int(item.get("evidence_count", 0)),
+            maturity=str(item.get("maturity", "proposed")),
+            created_at=str(item.get("created_at", "")),
+            updated_at=str(item.get("updated_at", "")),
+            approved_by=str(item.get("approved_by", "")),
         )
 
     def _normalize_entry(self, item: dict) -> EpisodeRecord:
@@ -686,6 +718,20 @@ class HistoryStore:
         finally:
             self._unlock_handle(handle)
 
+    def load_policies(self) -> list[Policy]:
+        handle = self._lock_handle()
+        try:
+            return self._load_policies_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+    def write_policies(self, policies: list[Policy]) -> None:
+        handle = self._lock_handle()
+        try:
+            self._write_policies_unlocked(policies)
+        finally:
+            self._unlock_handle(handle)
+
     def load_personality(self) -> dict:
         handle = self._lock_handle()
         try:
@@ -793,6 +839,71 @@ class HistoryStore:
                     for t in trajectories
                 ]
             self._atomic_write_json(self.ghost_trajectories_file, trajectories)
+        finally:
+            self._unlock_handle(handle)
+
+    # ── Curiosity Layer persistence ────────────────────────────────────────
+
+    def load_curiosity_signals(self) -> list[dict]:
+        """Load all stored CuriositySignal records as raw dicts."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.curiosity_signals_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_curiosity_signals(self, signals: list[dict]) -> None:
+        """Atomically write CuriositySignal records."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.curiosity_signals_file, signals)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_knowledge_gap_clusters(self) -> list[dict]:
+        """Load all stored KnowledgeGapCluster records as raw dicts."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.knowledge_gap_clusters_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_knowledge_gap_clusters(self, clusters: list[dict]) -> None:
+        """Atomically write KnowledgeGapCluster records."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.knowledge_gap_clusters_file, clusters)
+        finally:
+            self._unlock_handle(handle)
+
+    def save_signal_with_cluster(
+        self,
+        signal_dict: dict,
+        cluster_dict: dict,
+    ) -> None:
+        """Atomically save a curiosity signal and its updated cluster together."""
+        handle = self._lock_handle()
+        try:
+            # Signals
+            signals = self._read_json_list(self.curiosity_signals_file)
+            existing_ids = {s.get("id") for s in signals}
+            if signal_dict.get("id") not in existing_ids:
+                signals.insert(0, signal_dict)
+            else:
+                signals = [signal_dict if s.get("id") == signal_dict.get("id") else s for s in signals]
+            self._atomic_write_json(self.curiosity_signals_file, signals)
+
+            # Clusters
+            clusters = self._read_json_list(self.knowledge_gap_clusters_file)
+            cluster_ids = {c.get("id") for c in clusters}
+            if cluster_dict.get("id") not in cluster_ids:
+                clusters.insert(0, cluster_dict)
+            else:
+                clusters = [
+                    cluster_dict if c.get("id") == cluster_dict.get("id") else c
+                    for c in clusters
+                ]
+            self._atomic_write_json(self.knowledge_gap_clusters_file, clusters)
         finally:
             self._unlock_handle(handle)
 
@@ -1067,6 +1178,7 @@ class HistoryStore:
         tags: list[str] | None = None,
         guidance_applied: bool = False,
         metadata: dict | None = None,
+        reaction_score_override: float | None = None,
     ) -> ConversationTurn:
         now = datetime.now()
         metadata_payload = metadata if isinstance(metadata, dict) else {}
@@ -1100,8 +1212,13 @@ class HistoryStore:
             else:
                 inferred_tags = sorted({*inferred_tags, *provided_tags})
 
-        # Auto-score from reaction: use LLM if available, else rule-based
-        if self._scorer is not None:
+        # Score from reaction: client override > LLM scorer > rule-based
+        if reaction_score_override is not None and 0.0 <= reaction_score_override <= 1.0:
+            reaction_score = reaction_score_override
+            # Feed override into dictionary cache so it keeps learning
+            if self._scorer is not None:
+                self._scorer.teach(user_feedback, inferred_corrections, reaction_score)
+        elif self._scorer is not None:
             reaction_score = self._scorer.score(user_feedback, inferred_corrections)
         else:
             reaction_score = score_reaction(user_feedback, inferred_corrections)

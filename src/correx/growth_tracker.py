@@ -139,9 +139,15 @@ class GrowthTracker:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 continue
+            # Skip non-growth records (e.g., session feedback files)
+            if "record_id" not in data or "case_id" not in data:
+                continue
             if case_id and data.get("case_id") != case_id:
                 continue
-            records.append(self._deserialize(data))
+            try:
+                records.append(self._deserialize(data))
+            except (KeyError, TypeError):
+                continue
         return records
 
     def trend(self, case_id: str) -> list[dict]:
@@ -328,8 +334,23 @@ class GrowthTracker:
         }
 
     def _deserialize(self, data: dict) -> GrowthRecord:
-        br = data["baseline_run"]
-        gr = data["guided_run"]
+        br = data.get("baseline_run")
+        gr = data.get("guided_run")
+        if not br or not gr:
+            # Legacy record without run details — synthesize from top-level
+            br = br or {
+                "run_id": f"{data.get('record_id', 'unknown')}_base",
+                "output": data.get("baseline_output", ""),
+                "score": data.get("baseline_score", 0.0),
+                "ran_at": data.get("recorded_at", ""),
+            }
+            gr = gr or {
+                "run_id": f"{data.get('record_id', 'unknown')}_guided",
+                "guidance_text": data.get("guidance_text", ""),
+                "output": data.get("guided_output", ""),
+                "score": data.get("guided_score", 0.0),
+                "ran_at": data.get("recorded_at", ""),
+            }
         return GrowthRecord(
             record_id=data["record_id"],
             case_id=data["case_id"],

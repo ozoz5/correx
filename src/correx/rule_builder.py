@@ -35,7 +35,7 @@ from .schemas import (
 
 def build_preference_rules(
     turns: list[ConversationTurn],
-    min_promoted_evidence: int = 2,
+    min_promoted_evidence: int = 1,
 ) -> list[PreferenceRule]:
     """Build preference rules from conversation turns.
 
@@ -370,8 +370,8 @@ def build_preference_rules(
             min_promoted_evidence=min_promoted_evidence,
         )
         negative_conditions: list[str] = []
-        if is_explicit_directive(statement):
-            negative_conditions.append(statement)
+        # Note: do NOT add the rule's own statement as a negative condition.
+        # That was a self-referential bug causing rules to conflict with themselves.
         priority = max(1, min(5, round(max(support_score, expected_gain))))
         rule = PreferenceRule(
             id=f"pref-{normalized[:48].replace(' ', '-')}",

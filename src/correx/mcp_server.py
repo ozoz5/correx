@@ -525,6 +525,87 @@ def create_mcp_server(
         }
 
     @mcp.tool()
+    def save_policy(
+        id: str,
+        title: str,
+        core: str,
+        why: str,
+        analogy: str = "",
+        opposite: str = "",
+        limits: str = "",
+        source_rule_ids: list[str] | None = None,
+        source_ghost_ids: list[str] | None = None,
+        source_law_ids: list[str] | None = None,
+        scopes: list[str] | None = None,
+        tags: list[str] | None = None,
+        evidence_count: int = 0,
+        maturity: str = "proposed",
+        approved_by: str = "",
+    ) -> dict[str, Any]:
+        """Save a deep, interpretable policy derived from accumulated rules/ghosts.
+
+        A policy carries: core (essence), why (reasoning), analogy (extension),
+        opposite (when NOT to apply), limits (boundary conditions).
+        Unlike literal rules, policies enable reasoning in novel situations.
+
+        Maturity: "proposed" (needs user approval) | "active" (injected into guidance) | "superseded"
+        """
+        from .schemas import Policy as _Policy
+        policy = _Policy(
+            id=id,
+            title=title,
+            core=core,
+            why=why,
+            analogy=analogy,
+            opposite=opposite,
+            limits=limits,
+            source_rule_ids=source_rule_ids or [],
+            source_ghost_ids=source_ghost_ids or [],
+            source_law_ids=source_law_ids or [],
+            scopes=scopes or [],
+            tags=tags or [],
+            evidence_count=evidence_count,
+            maturity=maturity,
+            approved_by=approved_by,
+        )
+        saved = service.save_policy(policy)
+        return {"ok": True, "policy": asdict(saved)}
+
+    @mcp.tool()
+    def list_policies(active_only: bool = False) -> dict[str, Any]:
+        """List all policies. Active policies are injected into guidance context.
+
+        Policies are the highest-quality knowledge unit — deep, interpretable
+        principles with core/why/analogy/opposite/limits structure.
+        """
+        policies = service.list_policies(active_only=active_only)
+        return {
+            "items": [
+                {
+                    "id": p.id,
+                    "title": p.title,
+                    "core": p.core,
+                    "why": p.why,
+                    "analogy": p.analogy,
+                    "opposite": p.opposite,
+                    "limits": p.limits,
+                    "source_rule_ids": p.source_rule_ids,
+                    "source_ghost_ids": p.source_ghost_ids,
+                    "source_law_ids": p.source_law_ids,
+                    "evidence_count": p.evidence_count,
+                    "maturity": p.maturity,
+                    "scopes": p.scopes,
+                    "tags": p.tags,
+                    "approved_by": p.approved_by,
+                    "created_at": p.created_at,
+                    "updated_at": p.updated_at,
+                }
+                for p in policies
+            ],
+            "count": len(policies),
+        }
+
+    @mcp.tool()
     def predict_next_contexts(
         previous_context_nodes: list[dict] | None = None,
         session_id: str = "",
@@ -688,6 +769,7 @@ def create_mcp_server(
         guidance_applied: bool = False,
         ghost_option: str = "",
         metadata: dict | None = None,
+        reaction_score_override: float | None = None,
         ctx: Context | None = None,
     ) -> dict[str, Any]:
         """Use this when conversation feedback should become reusable preference memory.
@@ -695,7 +777,14 @@ def create_mcp_server(
         Set guidance_applied=True when guidance from build_guidance_context was used
         before generating assistant_message. This enables automatic growth measurement:
         turns without guidance become the baseline; turns with guidance show improvement.
-        Reaction score is inferred automatically — no explicit scoring needed.
+        Reaction score is inferred automatically by default, or can be overridden
+        by the client LLM for higher accuracy.
+
+        reaction_score_override: Optional float 0.0-1.0. When provided, the client
+        LLM's own judgment of the user's reaction is used instead of the rule-based
+        scorer. The client LLM is IN the conversation and understands context better
+        than pattern matching. Use this when you're confident about the user's sentiment.
+        Scale: 0.0=strong rejection, 0.5=neutral, 0.75=acceptance, 0.9=strong praise.
 
         ghost_option: Optional. If the AI proposed something that was rejected or
         corrected, pass the rejected proposal text here. It will be stored as a
@@ -713,6 +802,7 @@ def create_mcp_server(
             guidance_applied=guidance_applied,
             auto_record_growth=True,
             metadata=metadata,
+            reaction_score_override=reaction_score_override,
         )
         if ctx is not None:
             await ctx.info(f"Saved conversation turn {turn.id} in scope {turn.task_scope or 'generic'} | reaction_score={turn.reaction_score}")
@@ -1050,6 +1140,115 @@ def create_mcp_server(
             ),
         }
 
+    # ── Curiosity Layer (third learning layer) ────────────────────────────
+
+    @mcp.tool()
+    def save_curiosity_signal(
+        question_text: str,
+        question_type: str = "knowledge_gap",
+        target: str = "self",
+        task_scope: str = "",
+        tags: list[str] | None = None,
+        keywords: list[str] | None = None,
+        confidence: float = 0.0,
+        source_turn_id: str = "",
+    ) -> dict[str, Any]:
+        """Record a user question detected by the client LLM.
+
+        The client LLM detects questions in user messages, classifies them,
+        and passes the result here. The server clusters related questions
+        and tracks knowledge gaps.
+
+        question_type:
+          - "knowledge_gap": user doesn't know (「って何？」「教えて」)
+          - "judgment_uncertainty": user can't decide (「どう思う？」「どっちがいい」)
+          - "confirmation_seeking": user wants reassurance (「合ってる？」「大丈夫？」)
+
+        target:
+          - "self": user is asking for themselves (「わかりやすく教えて」)
+          - "other": user needs to explain to someone else (「わかりやすくまとめて」)
+
+        keywords: core keywords of the question for clustering.
+        """
+        signal_dict, cluster_dict, is_new = service.save_curiosity_signal(
+            question_text=question_text,
+            question_type=question_type,
+            target=target,
+            task_scope=task_scope,
+            tags=tags,
+            keywords=keywords,
+            confidence=confidence,
+            source_turn_id=source_turn_id,
+        )
+        return {
+            "ok": True,
+            "signal_id": signal_dict["id"],
+            "question_type": signal_dict["question_type"],
+            "cluster_id": cluster_dict["id"],
+            "cluster_is_new": is_new,
+            "cluster_signal_count": cluster_dict["signal_count"],
+            "cluster_escalation_score": cluster_dict["escalation_score"],
+            "cluster_status": cluster_dict["status"],
+        }
+
+    @mcp.tool()
+    def resolve_curiosity_clusters(
+        task_scope: str = "",
+    ) -> dict[str, Any]:
+        """Resolve open knowledge gap clusters when user is satisfied.
+
+        Call this when the user expresses satisfaction or the topic is resolved.
+        Resolves all open/escalated clusters matching the given scope.
+        """
+        resolved_count = service.resolve_curiosity_clusters(task_scope=task_scope)
+        return {
+            "ok": True,
+            "resolved_count": resolved_count,
+        }
+
+    @mcp.tool()
+    def get_cognitive_map() -> dict[str, Any]:
+        """Get the cognitive map — a scope-level view of knowledge gaps.
+
+        Use at session start to understand where the user needs more explanation.
+        Returns gap strengths per scope, hotspots (escalated areas),
+        and counts of open/escalated clusters.
+
+        High gap_strength + escalated = user has been asking about this repeatedly.
+        Provide foundational explanations in those areas.
+        """
+        cognitive_map = service.get_cognitive_map()
+        return {
+            "ok": True,
+            **cognitive_map,
+        }
+
+    @mcp.tool()
+    def list_knowledge_gap_clusters(
+        include_resolved: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """List knowledge gap clusters for detailed analysis.
+
+        Each cluster represents a group of related questions in the same scope.
+        Shows escalation scores, question types, and signal counts.
+        """
+        clusters = service.list_knowledge_gap_clusters(
+            include_resolved=include_resolved,
+            limit=limit,
+        )
+        open_c = [c for c in clusters if c.get("status") == "open"]
+        escalated_c = [c for c in clusters if c.get("status") == "escalated"]
+        return {
+            "ok": True,
+            "total": len(clusters),
+            "open_count": len(open_c),
+            "escalated_count": len(escalated_c),
+            "clusters": clusters,
+        }
+
+    # ── Session ingestion ──────────────────────────────────────────────────
+
     @mcp.tool()
     def ingest_claude_sessions(
         projects_dir: str = "",
@@ -1214,6 +1413,94 @@ def create_mcp_server(
             "new_ghosts": new_ghosts,
             "total_turns_now": len(existing_ids),
         }
+
+    @mcp.tool()
+    def get_pending_sublimations() -> dict[str, Any]:
+        """Get ghost trajectories that need client-side LLM sublimation.
+
+        Returns fired trajectories where the principle is missing or was
+        template-generated. Each entry includes the ghost rejection records
+        so you (the client LLM) can extract a behavioral principle.
+
+        For each pending trajectory:
+        1. Read the ghosts (rejected AI outputs + user reactions)
+        2. Extract ONE behavioral principle (20-50 chars, Japanese)
+        3. Optionally generalize into a universal law
+        4. Call save_sublimation() with the result
+
+        Format: "〜するな" or "〜してから〜せよ" — concrete, actionable.
+        """
+        pending = service.get_pending_sublimations()
+        return {
+            "ok": True,
+            "count": len(pending),
+            "pending": pending,
+            "instructions": (
+                "For each trajectory, read the ghost rejection patterns and write "
+                "a behavioral principle in 20-50 chars Japanese. "
+                "Then call save_sublimation(trajectory_id, principle, universal_law)."
+            ) if pending else "No pending sublimations.",
+        }
+
+    @mcp.tool()
+    def save_sublimation(
+        trajectory_id: str,
+        principle: str,
+        universal_law: str = "",
+        law_match_index: int = 0,
+    ) -> dict[str, Any]:
+        """Save a sublimated principle extracted by the client LLM.
+
+        Called after get_pending_sublimations(). The client LLM reads
+        the ghost rejection patterns and writes a behavioral principle.
+
+        Args:
+            trajectory_id: The trajectory ID from get_pending_sublimations().
+            principle: Behavioral principle (20-50 chars Japanese recommended).
+                       Format: "〜するな" or "〜してから〜せよ"
+            universal_law: Optional. A generalized version that removes
+                          scope-specific nouns (applicable to any context).
+            law_match_index: If universal_law matches an existing law,
+                           pass its 1-based index. Pass 0 for new law.
+        """
+        return service.save_sublimation(
+            trajectory_id=trajectory_id,
+            principle=principle,
+            universal_law=universal_law,
+            law_match_index=law_match_index,
+        )
+
+    @mcp.tool()
+    def evaluate_guidance_effectiveness(
+        evaluations: list[dict],
+        task_scope: str = "",
+    ) -> dict[str, Any]:
+        """Self-evaluate which guidance rules actually helped your output.
+
+        Call this after completing a meaningful task where build_guidance_context
+        was used. You (the client LLM) are the best judge of whether the
+        injected rules improved your output — you were IN the conversation.
+
+        For each rule from build_guidance_context, score its effectiveness:
+        - 0.9: This rule directly improved my output quality
+        - 0.7: This rule was somewhat helpful
+        - 0.5: Neutral, didn't affect my output
+        - 0.3: This rule was irrelevant to this task
+        - 0.1: This rule actively made my output worse
+
+        Args:
+            evaluations: List of {rule_id: str, score: float 0.0-1.0, reason: str}.
+                        rule_id is the preference rule ID from build_guidance_context.
+            task_scope: The scope of the task that was completed.
+
+        Rules scoring >= 0.7 get boosted (promoted faster).
+        Rules scoring < 0.3 get penalized (demoted if consistently failing).
+        This creates a self-optimizing feedback loop with zero user intervention.
+        """
+        return service.evaluate_guidance_effectiveness(
+            evaluations=evaluations,
+            task_scope=task_scope,
+        )
 
     @mcp.tool()
     def generate_session_feedback(
