@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .auto_train import run_auto_training_cycle
+from .dormancy import awaken_relevant, forget_stale, forget_stale_rules, scan_and_dormant
 from .growth_tracker import GrowthRecord, GrowthTracker
 from .history_store import HistoryStore
 from .llm_scorer import Backend, LlmScorer
@@ -31,7 +32,17 @@ from .personality_layer import (
     detect_interventions,
     format_personality_guidance,
 )
-from .schemas import Meaning, Principle
+from .schemas import Meaning, Policy, Principle
+from .curiosity_engine import (
+    build_cognitive_map,
+    cluster_from_dict,
+    cluster_to_dict,
+    create_signal,
+    process_curiosity_signal,
+    resolve_cluster,
+    signal_from_dict,
+    signal_to_dict,
+)
 from .ghost_engine import (
     create_ghost,
     ghost_from_dict,
@@ -43,6 +54,50 @@ from .ghost_engine import (
 from .mlx_trainer import MlxLoraTrainingConfig
 from .secret_store import delete_secure_secret, get_secure_secret, set_secure_secret
 from .training_dataset import export_mlx_lm_dataset
+
+
+def _char_bigram_similarity(a: str, b: str) -> float:
+    """Char-bigram Jaccard similarity for Japanese text (no tokenizer needed)."""
+    if not a or not b:
+        return 0.0
+    sa = {a[i:i+2] for i in range(len(a) - 1)} if len(a) > 1 else {a}
+    sb = {b[i:i+2] for i in range(len(b) - 1)} if len(b) > 1 else {b}
+    intersection = sa & sb
+    union = sa | sb
+    return len(intersection) / len(union) if union else 0.0
+
+
+def _deduplicate_ghost_principles(
+    principles: list[str],
+    *,
+    similarity_threshold: float = 0.5,
+    cap: int = 5,
+) -> list[str]:
+    """Clean, deduplicate, and cap ghost principles.
+
+    Uses char-bigram similarity to remove near-duplicates.
+    Returns at most `cap` unique principles.
+    """
+    cleaned: list[str] = []
+    for p in principles:
+        p = p.strip()
+        for prefix in ["**汎用原則:**", "**汎用原則：**", "汎用原則:", "固有原則:"]:
+            if p.startswith(prefix):
+                p = p[len(prefix):].strip()
+        p = p.split("\n")[0].strip().strip("「」\"'")
+        if len(p) < 5 or len(p) > 80:
+            continue
+        # Check near-duplicate against already accepted
+        is_dup = False
+        for existing in cleaned:
+            if _char_bigram_similarity(p, existing) >= similarity_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            cleaned.append(p)
+        if len(cleaned) >= cap:
+            break
+    return cleaned
 
 
 class CorrexService:
@@ -136,6 +191,7 @@ class CorrexService:
         guidance_applied: bool = False,
         auto_record_growth: bool = True,
         metadata: dict | None = None,
+        reaction_score_override: float | None = None,
     ):
         turn = self.history.save_conversation_turn(
             task_scope=task_scope,
@@ -146,6 +202,7 @@ class CorrexService:
             tags=tags,
             guidance_applied=guidance_applied,
             metadata=metadata,
+            reaction_score_override=reaction_score_override,
         )
         if auto_record_growth:
             turns = self.history.load_conversation_turns()
@@ -192,8 +249,8 @@ class CorrexService:
             instruction = (rule.get("instruction", "") or rule.get("statement", "")).lower()
             # Check if the anger overlaps with this dormant rule's domain
             # Simple word overlap check (3+ shared content words)
-            rule_words = set(w for w in instruction if len(w) > 2)
-            signal_words = set(w for w in signal if len(w) > 2)
+            rule_words = set(w for w in instruction.split() if len(w) > 2)
+            signal_words = set(w for w in signal.split() if len(w) > 2)
             overlap = len(rule_words & signal_words)
             if overlap >= 3 or scope == rule.get("applies_to_scope", ""):
                 rule["status"] = "candidate"
@@ -205,9 +262,30 @@ class CorrexService:
             if isinstance(data, dict):
                 data["items"] = items
             try:
-                rules_path.write_text(_json.dumps(data, ensure_ascii=False, indent=2))
-            except OSError:
+                self.history._atomic_write_json(rules_path, items)
+            except (OSError, AttributeError):
                 pass
+
+        # Also awaken dormant ghost principles
+        self._awaken_dormant_ghost_principles(turn)
+
+    def _awaken_dormant_ghost_principles(self, turn) -> None:
+        """Wake dormant ghost principles when a correction indicates the law wasn't enough."""
+        feedback = getattr(turn, "user_feedback", "") or ""
+        scope = getattr(turn, "task_scope", "") or ""
+        if not feedback:
+            return
+
+        trajectories = self.history.load_ghost_trajectories()
+        has_dormant = any(t.get("dormant") for t in trajectories)
+        if not has_dormant:
+            return
+
+        trajectories, awakened = awaken_relevant(
+            trajectories, feedback, scope,
+        )
+        if awakened:
+            self.history.write_ghost_trajectories(trajectories)
 
     def save_training_example(
         self,
@@ -500,10 +578,22 @@ class CorrexService:
         if personality_section:
             sections.append(personality_section)
 
+        # Policy layer: deep interpretable principles (highest priority)
+        policy_section = self._build_policy_guidance()
+        if policy_section:
+            sections.append(policy_section)
+
         # Ghost layer: sublimated principles from rejected proposals
         ghost_section = self._build_ghost_guidance()
         if ghost_section:
             sections.append(ghost_section)
+
+        # Curiosity layer: knowledge gap warnings
+        curiosity_section = self._build_curiosity_guidance(
+            task_scope=task_scope or task_title
+        )
+        if curiosity_section:
+            sections.append(curiosity_section)
 
         return "\n\n".join(section for section in sections if section)
 
@@ -531,8 +621,17 @@ class CorrexService:
         if not turns:
             profile = PersonalityProfile()
             return profile, []
-        profile = compute_personality_profile(turns, rules)
-        interventions = detect_interventions(rules, turns, profile)
+        curiosity_signals = self.history.load_curiosity_signals()
+        profile = compute_personality_profile(turns, rules, curiosity_signals=curiosity_signals)
+
+        # Escalated clusters for knowledge_gap_warning intervention
+        cluster_dicts = self.history.load_knowledge_gap_clusters()
+        escalated = [
+            c for c in cluster_dicts
+            if c.get("status") == "escalated"
+            or (c.get("escalation_score", 0) >= 0.5 and c.get("status") != "resolved")
+        ]
+        interventions = detect_interventions(rules, turns, profile, escalated_clusters=escalated)
         self.history.write_personality(asdict(profile))
         return profile, interventions
 
@@ -581,7 +680,8 @@ class CorrexService:
         laws_path = self.history.base_dir / "ghost_universal_laws.json"
         if laws_path.exists():
             try:
-                laws = _json.loads(laws_path.read_text(encoding="utf-8"))
+                raw_laws = _json.loads(laws_path.read_text(encoding="utf-8"))
+                laws = raw_laws["items"] if isinstance(raw_laws, dict) and "items" in raw_laws else raw_laws
                 if laws:
                     law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
                     for i, law in enumerate(laws, 1):
@@ -597,7 +697,8 @@ class CorrexService:
         pos_path = self.history.base_dir / "ghost_positive_laws.json"
         if pos_path.exists():
             try:
-                pos_laws = _json.loads(pos_path.read_text(encoding="utf-8"))
+                raw_pos = _json.loads(pos_path.read_text(encoding="utf-8"))
+                pos_laws = raw_pos["items"] if isinstance(raw_pos, dict) and "items" in raw_pos else raw_pos
                 if pos_laws:
                     pos_lines = ["[推奨法理 — 肯定反応から抽出された推進基準]"]
                     for i, law in enumerate(pos_laws, 1):
@@ -621,46 +722,200 @@ class CorrexService:
             )
 
         # 4. Individual sublimated principles — specifics coexist with laws
-        # Laws are the umbrella for unknown situations.
-        # Specific principles are zero-judgment instant-apply rules for known situations.
-        # Both must coexist. Do not suppress specifics just because laws exist.
-        # But we filter for quality and cap to avoid flooding context.
+        # Laws are the umbrella; specifics are instant-apply for known situations.
+        # Aggressively deduplicate and cap to avoid context flooding.
         principles = self.get_fired_ghost_principles()
         if principles:
-            # Clean up: remove format artifacts from 7b generation
-            cleaned = []
-            seen = set()
-            for p in principles:
-                # Strip common artifacts
-                p = p.strip()
-                for prefix in ["**汎用原則:**", "**汎用原則：**", "汎用原則:", "固有原則:"]:
-                    if p.startswith(prefix):
-                        p = p[len(prefix):].strip()
-                # Take first line only, strip quotes
-                p = p.split("\n")[0].strip().strip("「」\"'")
-                # Skip if too short, too long, or duplicate
-                if len(p) < 5 or len(p) > 80:
-                    continue
-                if p in seen:
-                    continue
-                seen.add(p)
-                cleaned.append(p)
+            cleaned = _deduplicate_ghost_principles(principles, similarity_threshold=0.5, cap=5)
 
             if cleaned:
-                # Cap at 20 to balance specificity vs context usage
-                top = cleaned[:20]
                 p_lines = [
                     "[固有原則 — 既知の場面で即適用する具体基準]",
-                    "法理は未知の場面で類推適用する傘。固有原則は既知の場面で判断不要で即適用する。",
-                    "両方が共存する。法理があるからといって固有原則を無視するな。",
                 ]
-                for i, p in enumerate(top, 1):
+                for i, p in enumerate(cleaned, 1):
                     p_lines.append(f"  {i}. {p}")
-                if len(cleaned) > 20:
-                    p_lines.append(f"  (他{len(cleaned) - 20}件の固有原則あり)")
                 sections.append("\n".join(p_lines))
 
         return "\n\n".join(sections)
+
+    # ------------------------------------------------------------------
+    # Policy layer
+    # ------------------------------------------------------------------
+
+    def save_policy(self, policy: Policy) -> Policy:
+        """Save or update a policy."""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M")
+        policies = self.history.load_policies()
+        existing = next((p for p in policies if p.id == policy.id), None)
+        if existing:
+            # Update in place
+            idx = policies.index(existing)
+            if not policy.created_at:
+                policy.created_at = existing.created_at
+            policy.updated_at = now
+            policies[idx] = policy
+        else:
+            if not policy.created_at:
+                policy.created_at = now
+            policy.updated_at = now
+            policies.append(policy)
+        self.history.write_policies(policies)
+
+        # Auto-dormancy: when a policy becomes active, retire covered principles
+        if policy.maturity == "active":
+            self._run_dormancy_scan()
+
+        return policy
+
+    def _run_dormancy_scan(self) -> tuple[int, int]:
+        """Scan all ghost principles and dormant ones covered by laws/policies.
+
+        Returns (dormant_count, active_count).
+        """
+        trajectories = self.history.load_ghost_trajectories()
+
+        # Collect law texts
+        laws: list[str] = []
+        for law_file in ["ghost_universal_laws.json", "ghost_positive_laws.json"]:
+            import json as _json
+            path = self.history.base_dir / law_file
+            if path.exists():
+                try:
+                    raw = _json.loads(path.read_text(encoding="utf-8"))
+                    # Handle both bare list and {"schema_version":..., "items":[...]}
+                    items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
+                    for item in (items if isinstance(items, list) else []):
+                        text = item.get("law", "") if isinstance(item, dict) else str(item)
+                        if text:
+                            laws.append(text)
+                except Exception:
+                    pass
+
+        # Collect policy core texts
+        policies_text = [p.core for p in self.history.load_policies() if p.maturity == "active"]
+
+        trajectories, dormant_count, active_count = scan_and_dormant(
+            trajectories, laws=laws, policies=policies_text,
+        )
+        self.history.write_ghost_trajectories(trajectories)
+
+        # Also retire preference rules covered by policies
+        self._dormant_preference_rules(policies_text, laws)
+
+        # Forget stale dormant items (30+ days without awakening)
+        trajectories = self.history.load_ghost_trajectories()
+        trajectories, forgotten_principles = forget_stale(trajectories)
+        if forgotten_principles > 0:
+            self.history.write_ghost_trajectories(trajectories)
+
+        self._forget_stale_rules()
+
+        return dormant_count, active_count
+
+    def _forget_stale_rules(self) -> int:
+        """Permanently delete preference rules dormant for 30+ days."""
+        import json as _json
+
+        rules_path = self.history.base_dir / "preference_rules.json"
+        if not rules_path.exists():
+            return 0
+        try:
+            raw = _json.loads(rules_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return 0
+
+        items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
+        remaining, forgotten = forget_stale_rules(items)
+        if forgotten > 0:
+            try:
+                self.history._atomic_write_json(rules_path, remaining)
+            except (OSError, AttributeError):
+                pass
+        return forgotten
+
+    def _dormant_preference_rules(
+        self,
+        policies_text: list[str],
+        laws: list[str],
+    ) -> int:
+        """Retire promoted preference rules that are covered by policies/laws.
+
+        Rules with 'retrograde' tag and generic content are retired.
+        Specific rules (no retrograde tag, meaningful length) are kept.
+        """
+        from .dormancy import check_coverage
+        import json as _json
+
+        rules_path = self.history.base_dir / "preference_rules.json"
+        if not rules_path.exists():
+            return 0
+
+        try:
+            raw = _json.loads(rules_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return 0
+
+        items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
+        retired = 0
+
+        for rule in items:
+            if not isinstance(rule, dict):
+                continue
+            if rule.get("status") != "promoted":
+                continue
+            # Keep specific rules (no retrograde, meaningful content)
+            tags = rule.get("tags") or []
+            stmt = rule.get("statement", "")
+            if "retrograde" not in tags and len(stmt) >= 25:
+                continue
+
+            # Check if covered by policies or laws
+            covering = check_coverage(stmt, laws=laws, policies=policies_text)
+            if covering:
+                rule["status"] = "dormant"
+                rule["dormant_reason"] = f"absorbed by: {covering}"
+                retired += 1
+
+        if retired > 0:
+            try:
+                self.history._atomic_write_json(rules_path, items)
+            except (OSError, AttributeError):
+                pass
+
+        return retired
+
+    def list_policies(self, *, active_only: bool = False) -> list[Policy]:
+        """List all policies, optionally filtering to active only."""
+        policies = self.history.load_policies()
+        if active_only:
+            return [p for p in policies if p.maturity == "active"]
+        return policies
+
+    def _build_policy_guidance(self) -> str:
+        """Build guidance from active policies for injection into context.
+
+        Policies are the highest-quality knowledge unit. They carry
+        core, why, analogy, opposite, and limits — enabling reasoning
+        in novel situations rather than literal rule-following.
+        """
+        policies = self.history.load_policies()
+        active = [p for p in policies if p.maturity == "active"]
+        if not active:
+            return ""
+        lines = ["[ポリシー — 深い判断基準]"]
+        for p in active:
+            lines.append(f"\n### {p.title}")
+            lines.append(f"核: {p.core}")
+            if p.why:
+                lines.append(f"なぜ: {p.why}")
+            if p.analogy:
+                lines.append(f"類推: {p.analogy}")
+            if p.opposite:
+                lines.append(f"反対: {p.opposite}")
+            if p.limits:
+                lines.append(f"限界: {p.limits}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Growth measurement
@@ -764,6 +1019,165 @@ class CorrexService:
     # Ghost Engine
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Curiosity layer (third learning layer)
+    # ------------------------------------------------------------------
+
+    def save_curiosity_signal(
+        self,
+        *,
+        question_text: str,
+        question_type: str = "knowledge_gap",
+        target: str = "self",
+        task_scope: str = "",
+        tags: list[str] | None = None,
+        keywords: list[str] | None = None,
+        confidence: float = 0.0,
+        source_turn_id: str = "",
+    ) -> tuple[dict, dict, bool]:
+        """Record a curiosity signal detected by the client LLM.
+
+        The client LLM detects questions in user messages, classifies them,
+        and passes the classification here. The server handles clustering
+        and persistence.
+
+        Returns:
+        - signal_dict: the stored CuriositySignal record
+        - cluster_dict: the updated/created KnowledgeGapCluster record
+        - is_new_cluster: whether a new cluster was created
+        """
+        signal = create_signal(
+            question_text=question_text,
+            question_type=question_type,
+            target=target,
+            task_scope=task_scope,
+            tags=tags,
+            keywords=keywords,
+            confidence=confidence,
+            source_turn_id=source_turn_id,
+        )
+
+        # Load existing clusters
+        cluster_dicts = self.history.load_knowledge_gap_clusters()
+        clusters = [cluster_from_dict(d) for d in cluster_dicts]
+
+        # Process through pipeline
+        updated_signal, updated_cluster, is_new = process_curiosity_signal(
+            signal, clusters,
+        )
+
+        # Persist
+        signal_dict = signal_to_dict(updated_signal)
+        cluster_dict = cluster_to_dict(updated_cluster)
+        self.history.save_signal_with_cluster(signal_dict, cluster_dict)
+
+        return signal_dict, cluster_dict, is_new
+
+    def resolve_curiosity_clusters(
+        self,
+        task_scope: str = "",
+    ) -> int:
+        """Resolve open curiosity clusters matching the given scope.
+
+        Called by the client LLM when the user expresses satisfaction.
+        Requires a non-empty task_scope to prevent accidental mass-resolution.
+        Returns the number of clusters resolved.
+        """
+        if not task_scope:
+            return 0  # Refuse to resolve without a scope — prevents data loss
+
+        cluster_dicts = self.history.load_knowledge_gap_clusters()
+        clusters = [cluster_from_dict(d) for d in cluster_dicts]
+
+        resolved_count = 0
+        for cluster in clusters:
+            if cluster.status != "open" and cluster.status != "escalated":
+                continue
+            # Match by primary scope or scopes list
+            if cluster.scope != task_scope and task_scope not in cluster.scopes:
+                continue
+            resolve_cluster(cluster)
+            resolved_count += 1
+
+        if resolved_count > 0:
+            self.history.write_knowledge_gap_clusters(
+                [cluster_to_dict(c) for c in clusters]
+            )
+
+        return resolved_count
+
+    def get_cognitive_map(self) -> dict:
+        """Build and return the cognitive map of knowledge gaps.
+
+        Used by the client LLM at session start to understand
+        where the user needs more explanation.
+        """
+        cluster_dicts = self.history.load_knowledge_gap_clusters()
+        clusters = [cluster_from_dict(d) for d in cluster_dicts]
+        return build_cognitive_map(clusters)
+
+    def list_curiosity_signals(self, limit: int = 50) -> list[dict]:
+        """List recent curiosity signals."""
+        signals = self.history.load_curiosity_signals()
+        return signals[:limit]
+
+    def list_knowledge_gap_clusters(
+        self,
+        include_resolved: bool = False,
+        limit: int = 20,
+    ) -> list[dict]:
+        """List knowledge gap clusters."""
+        clusters = self.history.load_knowledge_gap_clusters()
+        if not include_resolved:
+            clusters = [c for c in clusters if c.get("status") != "resolved"]
+        return clusters[:limit]
+
+    def _build_curiosity_guidance(self, task_scope: str = "") -> str:
+        """Build curiosity-layer guidance section for injection into guidance context."""
+        cluster_dicts = self.history.load_knowledge_gap_clusters()
+        clusters = [cluster_from_dict(d) for d in cluster_dicts]
+
+        # Filter to relevant clusters (open/escalated, matching scope or high escalation)
+        relevant = []
+        for c in clusters:
+            if c.status == "resolved":
+                continue
+            scope_match = (
+                not task_scope
+                or c.scope == task_scope
+                or task_scope in c.scopes
+            )
+            high_escalation = c.escalation_score >= 0.5
+            if scope_match or high_escalation:
+                relevant.append(c)
+
+        if not relevant:
+            return ""
+
+        lines = ["[知識空白地図 — Curiosity Layer]"]
+        for c in sorted(relevant, key=lambda x: x.escalation_score, reverse=True):
+            status_marker = "⚠" if c.status == "escalated" else "○"
+            kw_str = ", ".join(c.theme_keywords[:5])
+            type_label = {
+                "knowledge_gap": "知らない",
+                "judgment_uncertainty": "決められない",
+                "confirmation_seeking": "安心したい",
+            }.get(c.dominant_type, c.dominant_type)
+            lines.append(
+                f"  {status_marker} [{c.scope or 'general'}] {kw_str} — "
+                f"{type_label} (質問{c.signal_count}回, エスカレーション: {c.escalation_score:.0%})"
+            )
+
+        if any(c.status == "escalated" for c in relevant):
+            lines.append("")
+            lines.append("  → エスカレーション中の領域は、基礎から丁寧に説明せよ")
+
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Ghost layer (second learning layer)
+    # ------------------------------------------------------------------
+
     def save_ghost(
         self,
         *,
@@ -802,12 +1216,16 @@ class CorrexService:
         trajectories = [trajectory_from_dict(d) for d in trajectory_dicts]
         all_ghosts = {d["id"]: ghost_from_dict(d) for d in ghost_dicts}
 
+        # Gather existing principles for dedup
+        existing_principles = self.get_fired_ghost_principles()
+
         # Process ghost through pipeline
         updated_ghost, updated_trajectory, fired_principles = process_ghost(
             ghost=ghost,
             trajectories=trajectories,
             all_ghosts=all_ghosts,
             metabolism_rate=metabolism_rate,
+            existing_principles=existing_principles,
         )
 
         # Persist
@@ -938,13 +1356,16 @@ class CorrexService:
         if not candidates:
             return
 
-        # Simple word-overlap check: if the new principle shares 3+ content words
-        # with a candidate rule, that rule is now covered
-        new_words = set(new_principle.lower())
+        # Word-overlap check: if the new principle shares 3+ content words
+        # with a candidate rule, that rule is now covered.
+        # Use .split() for word-level comparison (NOT set(text) which gives chars).
+        import re as _re
+        _word_pat = _re.compile(r"[ぁ-んァ-ンー一-龯]{2,}|[a-zA-Z]{3,}")
+        new_words = set(_word_pat.findall(new_principle.lower()))
         dormanted = 0
         for rule in candidates:
             instruction = (rule.get("instruction", "") or rule.get("statement", "")).lower()
-            rule_words = set(instruction)
+            rule_words = set(_word_pat.findall(instruction))
             if len(new_words & rule_words) >= 3:
                 rule["status"] = "dormant"
                 rule["dormant_law"] = new_principle
@@ -957,6 +1378,227 @@ class CorrexService:
                 rules_path.write_text(_json.dumps(data, ensure_ascii=False, indent=2))
             except OSError:
                 pass
+
+    # ------------------------------------------------------------------
+    # Client-side sublimation support (LLM-free server)
+    # ------------------------------------------------------------------
+
+    def get_pending_sublimations(self) -> list[dict]:
+        """Return fired ghost trajectories that need client-side LLM sublimation.
+
+        Returns trajectories where:
+        - fired == True
+        - sublimated_principle is empty/missing OR was template-generated
+        """
+        trajectories = self.history.load_ghost_trajectories()
+        ghost_list = self.history.load_ghosts()
+        # Convert list[dict] to dict[str, dict] keyed by ghost ID
+        ghost_by_id: dict[str, dict] = {d.get("id", ""): d for d in ghost_list if d.get("id")}
+        pending = []
+
+        # Template-generated principle markers (all known patterns)
+        _TEMPLATE_MARKERS = (
+            "繰り返し修正されてきた",
+            "傾向がある",
+            "繰り返し却下されている",
+            "回却下された",
+            "初期シグナル",
+            "中程度の確信",
+            "強い確信",
+        )
+
+        for t in trajectories:
+            if not t.get("fired"):
+                continue
+            principle = (t.get("sublimated_principle") or "").strip()
+            is_template = any(marker in principle for marker in _TEMPLATE_MARKERS)
+            if not principle or is_template:
+                ghost_ids = t.get("ghost_ids", [])
+                ghosts_data = []
+                for gid in ghost_ids[:5]:
+                    g = ghost_by_id.get(gid)
+                    if g:
+                        ghosts_data.append({
+                            "rejected_output": (g.get("rejected_output") or "")[:300],
+                            "actual_outcome": (g.get("actual_outcome") or "")[:300],
+                            "origin": g.get("origin", ""),
+                        })
+                pending.append({
+                    "trajectory_id": t.get("id", ""),
+                    "theme": t.get("theme", ""),
+                    "scopes": t.get("scopes", []),
+                    "ghost_count": len(ghost_ids),
+                    "cumulative_pe": t.get("cumulative_pe", 0),
+                    "current_principle": principle,
+                    "ghosts": ghosts_data,
+                })
+        return pending
+
+    def save_sublimation(
+        self,
+        trajectory_id: str,
+        principle: str,
+        universal_law: str = "",
+        law_match_index: int = 0,
+    ) -> dict:
+        """Save a client-side LLM sublimation result.
+
+        Args:
+            trajectory_id: ID of the trajectory to update.
+            principle: The sublimated principle (20-50 chars recommended).
+            universal_law: Optional universal law generalized from principle.
+            law_match_index: If > 0, absorb into existing law at this index (1-based).
+        """
+        import json as _json
+
+        trajectories = self.history.load_ghost_trajectories()
+        updated = False
+        for t in trajectories:
+            if t.get("id") == trajectory_id:
+                t["sublimated_principle"] = principle.strip()
+                updated = True
+                break
+
+        if not updated:
+            return {"ok": False, "error": f"Trajectory {trajectory_id} not found"}
+
+        # Save trajectories (using locked atomic write)
+        try:
+            self.history.write_ghost_trajectories(trajectories)
+        except OSError:
+            return {"ok": False, "error": "Failed to write trajectories"}
+
+        # Handle universal law if provided
+        if universal_law:
+            laws_path = self.history.base_dir / "ghost_universal_laws.json"
+            try:
+                laws = _json.loads(laws_path.read_text(encoding="utf-8")) if laws_path.exists() else []
+            except (ValueError, OSError):
+                laws = []
+
+            if law_match_index > 0 and law_match_index <= len(laws):
+                # Absorb into existing law
+                laws[law_match_index - 1].setdefault("covers", [])
+                laws[law_match_index - 1]["covers"].append({
+                    "principle": universal_law,
+                    "trajectory_id": trajectory_id,
+                })
+            else:
+                # New law
+                laws.append({
+                    "law": universal_law,
+                    "covers": [{"principle": universal_law, "trajectory_id": trajectory_id}],
+                    "auto_generated": True,
+                    "client_sublimated": True,
+                })
+
+            try:
+                laws_path.write_text(_json.dumps(laws, ensure_ascii=False, indent=2))
+            except OSError:
+                pass
+
+            # Re-evaluate dormant rules
+            self._refresh_dormant_from_laws(laws, universal_law)
+
+        return {
+            "ok": True,
+            "trajectory_id": trajectory_id,
+            "principle": principle,
+            "universal_law": universal_law or None,
+        }
+
+    # ------------------------------------------------------------------
+    # Client-side rule effectiveness evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate_guidance_effectiveness(
+        self,
+        evaluations: list[dict],
+        task_scope: str = "",
+    ) -> dict:
+        """Update rule metrics based on client LLM self-evaluation.
+
+        Each evaluation: {"rule_id": str, "score": float 0.0-1.0, "reason": str}
+        - score >= 0.7: rule helped → increment success_count, boost expected_gain
+        - score 0.3-0.7: neutral → no change
+        - score < 0.3: rule hurt or was irrelevant → increment failure_count
+
+        This feeds into the existing promotion/demotion lifecycle.
+        """
+        import json as _json
+
+        rules_path = self.history.base_dir / "preference_rules.json"
+        if not rules_path.exists():
+            return {"ok": False, "error": "No rules file found"}
+
+        try:
+            data = _json.loads(rules_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return {"ok": False, "error": "Failed to read rules"}
+
+        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        rules_by_id = {r.get("id", ""): r for r in items}
+
+        updated = 0
+        promoted = 0
+        demoted = 0
+
+        for ev in evaluations:
+            rule_id = ev.get("rule_id", "")
+            score = ev.get("score", 0.5)
+            rule = rules_by_id.get(rule_id)
+            if not rule:
+                continue
+
+            old_gain = rule.get("expected_gain", 0.0)
+
+            if score >= 0.7:
+                # Rule helped — boost
+                rule["success_count"] = rule.get("success_count", 0) + 1
+                rule["expected_gain"] = old_gain + (score - 0.5) * 2
+                rule["confidence_score"] = min(
+                    0.95,
+                    rule.get("confidence_score", 0.5) + 0.05,
+                )
+                if rule.get("status") == "candidate":
+                    # Check if ready for promotion
+                    if rule.get("success_count", 0) >= 3 and rule.get("confidence_score", 0) >= 0.6:
+                        rule["status"] = "promoted"
+                        promoted += 1
+            elif score < 0.3:
+                # Rule hurt — penalize
+                rule["failure_count"] = rule.get("failure_count", 0) + 1
+                rule["expected_gain"] = max(0, old_gain - (0.5 - score) * 2)
+                rule["confidence_score"] = max(
+                    0.0,
+                    rule.get("confidence_score", 0.5) - 0.05,
+                )
+                # Auto-demote if consistently failing
+                if rule.get("failure_count", 0) >= 5 and rule.get("success_count", 0) < 2:
+                    if rule.get("status") in ("promoted", "candidate"):
+                        rule["status"] = "disabled"
+                        demoted += 1
+
+            updated += 1
+
+        if updated > 0:
+            if isinstance(data, dict):
+                data["items"] = items
+            try:
+                rules_path.write_text(
+                    _json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+
+        return {
+            "ok": True,
+            "evaluated": updated,
+            "promoted": promoted,
+            "demoted": demoted,
+            "task_scope": task_scope,
+        }
 
     # ------------------------------------------------------------------
     # Contextual feedback collection
@@ -1079,10 +1721,75 @@ class CorrexService:
         return trajectories[:limit]
 
     def get_fired_ghost_principles(self) -> list[str]:
-        """Get all sublimated principles from fired trajectories."""
+        """Get all sublimated principles from fired trajectories.
+
+        Applies runtime dedup: exact match removal + bigram similarity > 0.5.
+        """
+        import re
+
         trajectories = self.history.load_ghost_trajectories()
-        principles = []
+        raw: list[str] = []
         for t in trajectories:
-            if t.get("fired") and t.get("sublimated_principle"):
-                principles.append(t["sublimated_principle"])
-        return principles
+            if t.get("fired") and t.get("sublimated_principle") and not t.get("dormant"):
+                p = t["sublimated_principle"].strip()
+                if p:
+                    raw.append(p)
+
+        if not raw:
+            return []
+
+        # --- sanitize broken principles ---
+        def _sanitize(text: str) -> str:
+            # Remove noise prefixes
+            text = re.sub(r"^(汎用原則|固有原則|固有)\s*[:：]\s*", "", text)
+            # Remove trailing explanations
+            text = re.sub(r"\s*(この原則は|解説[:：]|を汎用化すると).*$", "", text, flags=re.DOTALL)
+            # Remove markdown artifacts
+            text = re.sub(r"[「」\"']", "", text)
+            text = re.sub(r"\s+", " ", text).strip()
+            # Cut overly long to first sentence
+            if len(text) > 60:
+                first = re.split(r"[。\n]", text)[0]
+                if first and len(first) > 5:
+                    text = first
+            return text.strip()
+
+        sanitized = [_sanitize(p) for p in raw]
+        sanitized = [p for p in sanitized if p and len(p) > 3]
+
+        # --- exact dedup ---
+        seen: set[str] = set()
+        unique: list[str] = []
+        for p in sanitized:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+
+        # --- fuzzy dedup via char-bigram Jaccard ---
+        def _bigrams(text: str) -> set[str]:
+            t = re.sub(r"[\s、。]", "", text)
+            if len(t) < 2:
+                return set()
+            return {t[i:i+2] for i in range(len(t) - 1)}
+
+        deduped: list[str] = []
+        deduped_bigrams: list[set[str]] = []
+        for p in unique:
+            bg = _bigrams(p)
+            if not bg:
+                deduped.append(p)
+                deduped_bigrams.append(bg)
+                continue
+            is_dup = False
+            for existing_bg in deduped_bigrams:
+                if not existing_bg:
+                    continue
+                jaccard = len(bg & existing_bg) / len(bg | existing_bg)
+                if jaccard > 0.40:
+                    is_dup = True
+                    break
+            if not is_dup:
+                deduped.append(p)
+                deduped_bigrams.append(bg)
+
+        return deduped
