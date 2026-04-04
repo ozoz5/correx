@@ -21,38 +21,27 @@ STOPWORDS = {
 }
 
 CORRECTION_MARKERS = (
-    "しろ",
-    "するな",
-    "やめろ",
-    "直せ",
-    "増やせ",
-    "減らせ",
-    "削れ",
-    "足りない",
-    "多すぎ",
-    "弱い",
-    "必要",
-    "ダメ",
-    "だめ",
-    "嫌",
-    "見切れ",
-    "ズレ",
-    "余白",
-    "整理",
-    "学べ",
-    "ロマン",
+    # --- Japanese ---
+    "しろ", "するな", "やめろ", "直せ", "増やせ", "減らせ", "削れ",
+    "足りない", "多すぎ", "弱い", "必要", "ダメ", "だめ", "嫌",
+    "見切れ", "ズレ", "余白", "整理", "学べ", "ロマン",
+    # --- English ---
+    "fix", "change", "remove", "add", "update", "replace", "rewrite",
+    "don't", "stop", "never", "always", "must", "should",
+    "missing", "wrong", "broken", "incorrect",
+    "too much", "too little", "too long", "too short",
+    "instead", "rather", "better",
+    "need", "needs", "require", "required",
+    "unnecessary", "redundant", "excessive",
 )
 
 EXPLICIT_DIRECTIVE_MARKERS = (
-    "しろ",
-    "するな",
-    "やめろ",
-    "直せ",
-    "削れ",
-    "避けろ",
-    "必ず",
-    "絶対",
-    "常に",
+    # --- Japanese ---
+    "しろ", "するな", "やめろ", "直せ", "削れ", "避けろ",
+    "必ず", "絶対", "常に",
+    # --- English ---
+    "always", "never", "must", "do not", "don't",
+    "stop", "quit", "avoid", "ensure", "make sure",
 )
 
 LEADING_FILLERS = (

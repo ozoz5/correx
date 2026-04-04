@@ -84,17 +84,40 @@ PRAISE_MARKERS = (
     "ええやん", "ええね", "ええな", "ええぞ",
     "めっちゃええ",
 
-    # --- English ---
+    # --- English: direct praise ---
     "perfect", "great", "nice", "good", "excellent", "exactly",
-    "love it", "awesome", "amazing", "brilliant",
+    "love it", "awesome", "amazing", "brilliant", "fantastic",
     "well done", "impressive", "let's go", "ship it", "nailed it",
-    "cool", "sweet", "sick", "fire", "lit",
-    "yes", "yep", "yeah", "yup",
-    "that's it", "this is it", "bingo", "spot on",
-    "thank you", "thanks", "thx",
-    "makes sense", "fair enough",
-    "not bad", "decent",
-    "i like it", "i love it",
+    "wonderful", "superb", "magnificent", "stellar", "flawless",
+    "top notch", "first rate", "world class",
+    "beautiful", "elegant", "clean", "crisp", "solid",
+    "genius", "legendary", "god tier", "goated",
+    "chef's kiss", "muah",
+
+    # --- English: casual approval ---
+    "cool", "sweet", "sick", "fire", "lit", "dope", "rad", "legit",
+    "clutch", "goat", "based", "bussin", "slaps",
+    "yes", "yep", "yeah", "yup", "ye", "ya", "yas",
+    "sure", "alright", "aight", "bet", "word",
+    "that's it", "this is it", "bingo", "spot on", "bull's eye",
+    "on point", "on the money", "on the nose",
+
+    # --- English: gratitude ---
+    "thank you", "thanks", "thx", "ty", "tyvm", "appreciate it",
+    "grateful", "thanks a lot", "thanks so much", "much appreciated",
+
+    # --- English: agreement ---
+    "makes sense", "fair enough", "i agree", "agreed", "totally",
+    "absolutely", "definitely", "for sure", "100%", "hundred percent",
+    "right", "correct", "true", "exactly right", "precisely",
+    "you're right", "that's right", "that's correct",
+
+    # --- English: mild positive ---
+    "not bad", "decent", "reasonable", "acceptable", "works for me",
+    "i like it", "i love it", "i dig it", "this works",
+    "looks good", "looks great", "lgtm",
+    "keep going", "keep it up", "carry on",
+    "fine", "fair", "ok", "okay",
 )
 
 STRONG_PRAISE_MARKERS = (
@@ -117,7 +140,15 @@ STRONG_PRAISE_MARKERS = (
     # --- English ---
     "perfect", "excellent", "amazing", "brilliant", "impressive",
     "nailed it", "incredible", "phenomenal", "outstanding",
-    "masterpiece", "mind-blowing",
+    "masterpiece", "mind-blowing", "mind blowing",
+    "genius", "legendary", "god tier", "goated",
+    "insane", "unreal", "unbelievable",
+    "best ever", "best i've seen", "blew my mind",
+    "holy shit", "holy cow", "oh my god", "omg",
+    "flawless", "top notch", "world class",
+    "game changer", "next level",
+    "this is incredible", "this is perfect",
+    "chef's kiss",
 )
 
 # ============================================================
@@ -204,18 +235,50 @@ NEGATIVE_MARKERS = (
     "もう無理", "手に負えない",
     "話にならない", "お話にならない",
 
-    # --- English ---
-    "no", "nah", "nope",
-    "wrong", "incorrect", "inaccurate",
-    "terrible", "awful", "horrible",
-    "bad", "broken", "buggy",
-    "wtf", "wth", "come on", "seriously",
-    "useless", "pointless", "garbage", "trash",
-    "fix it", "redo it", "try again",
-    "not what i asked", "not what i wanted",
-    "that's not", "this is wrong",
-    "disappointing", "frustrated",
-    "stop", "don't",
+    # --- English: rejection ---
+    "no", "nah", "nope", "nuh uh", "hell no", "absolutely not",
+    "wrong", "incorrect", "inaccurate", "false", "not true",
+    "that's wrong", "that's not right", "that's incorrect",
+    "not even close", "way off", "missed the mark",
+
+    # --- English: quality complaints ---
+    "terrible", "awful", "horrible", "atrocious", "abysmal",
+    "bad", "poor", "weak", "lazy", "sloppy", "careless",
+    "half-assed", "half assed", "low effort", "low quality",
+    "mediocre", "subpar", "below average",
+    "broken", "buggy", "doesn't work", "not working",
+    "vague", "unclear", "confusing", "nonsense", "gibberish",
+    "too long", "too short", "too verbose", "too abstract",
+    "generic", "boilerplate", "cookie cutter", "copy paste",
+    "shallow", "superficial", "surface level",
+    "incomplete", "missing", "forgot", "left out", "skipped",
+    "outdated", "stale", "irrelevant", "off topic",
+
+    # --- English: redo requests ---
+    "fix it", "fix this", "redo it", "redo this", "try again",
+    "start over", "do it again", "one more time",
+    "rewrite", "rewrite this", "rewrite it",
+    "not what i asked", "not what i wanted", "not what i meant",
+    "i said", "i already said", "i told you", "i literally said",
+    "read it again", "look again", "check again",
+    "did you even read", "did you even look",
+
+    # --- English: frustration ---
+    "wtf", "wth", "come on", "seriously", "really",
+    "for real", "are you kidding", "you're kidding",
+    "i can't believe", "unbelievable",
+    "this is ridiculous", "this is absurd",
+    "what the hell", "what is this", "what are you doing",
+    "how many times", "i keep telling you", "again and again",
+    "ugh", "smh", "ffs", "jfc", "bruh",
+
+    # --- English: dismissal ---
+    "useless", "pointless", "garbage", "trash", "rubbish", "junk",
+    "waste of time", "not helpful", "unhelpful",
+    "disappointing", "disappointed", "let down",
+    "frustrated", "frustrating", "annoying", "annoyed",
+    "stop", "don't", "enough", "never mind", "forget it",
+    "i'll do it myself", "i'll just do it",
 )
 
 STRONG_REJECTION_MARKERS = (
@@ -238,10 +301,20 @@ STRONG_REJECTION_MARKERS = (
     "ゴミ", "クソ", "カス", "ポンコツ",
     "しょうもない",
     # --- English ---
-    "terrible", "awful", "horrible",
-    "wtf", "wth",
-    "useless", "garbage", "trash",
-    "not what i asked", "this is wrong",
+    "terrible", "awful", "horrible", "atrocious", "abysmal",
+    "wtf", "wth", "ffs", "jfc",
+    "useless", "garbage", "trash", "rubbish", "junk",
+    "not what i asked", "not what i wanted", "this is wrong",
+    "completely wrong", "totally wrong", "way off",
+    "start over", "do it again",
+    "how many times", "i keep telling you",
+    "waste of time", "i'll do it myself",
+    "are you kidding", "you're kidding",
+    "this is ridiculous", "this is absurd",
+    "did you even read", "did you even look",
+    "what the hell", "what is this",
+    "i can't believe",
+    "worst", "the worst",
 )
 
 # ============================================================
@@ -284,12 +357,20 @@ DIRECTION_MARKERS = (
     "ところで", "そういえば",
     "他にも", "他には",
 
-    # --- English ---
-    "then", "next", "now",
-    "go ahead", "go for it",
-    "try", "check", "look into",
-    "also", "and then",
-    "what about", "how about",
+    # --- English: direction ---
+    "then", "next", "now", "moving on", "let's move on",
+    "go ahead", "go for it", "proceed", "continue",
+    "try", "check", "look into", "explore", "investigate",
+    "also", "and then", "after that", "once that's done",
+    "what about", "how about", "what if", "could you",
+    "can you", "would you", "please",
+    "let's try", "let's see", "let's do",
+    "instead", "rather", "alternatively",
+    "actually", "on second thought", "wait",
+    "one more thing", "by the way", "btw",
+    "that's fine", "that works", "good enough",
+    "let's go with", "go with that", "sounds good",
+    "do it", "make it", "build it", "run it", "ship it",
 )
 
 # ============================================================
@@ -335,6 +416,35 @@ _RE_INTENSIFIED_NEGATIVE = re.compile(
 )
 
 
+# English: "don't ...", "stop ...-ing", "never ..."
+_RE_EN_PROHIBITION = re.compile(
+    r"\bdon'?t\s+\w+"
+    r"|\bstop\s+\w+ing"
+    r"|\bnever\s+\w+"
+    r"|\bquit\s+\w+ing",
+    re.IGNORECASE,
+)
+
+# English: "you should have", "why didn't you", "I told you to"
+_RE_EN_FRUSTRATION = re.compile(
+    r"\byou\s+should\s+have\b"
+    r"|\bwhy\s+didn'?t\s+you\b"
+    r"|\bI\s+(?:already\s+)?told\s+you\b"
+    r"|\bhow\s+many\s+times\b"
+    r"|\bi\s+(?:already\s+)?said\b"
+    r"|\bI\s+keep\s+(?:telling|asking|saying)\b"
+    r"|\bdid\s+you\s+even\s+(?:read|look|listen|try)\b",
+    re.IGNORECASE,
+)
+
+# English: intensifier + negative ("so bad", "really awful", "absolutely terrible")
+_RE_EN_INTENSIFIED_NEGATIVE = re.compile(
+    r"\b(?:so|really|very|extremely|absolutely|completely|totally|utterly|incredibly)\s+"
+    r"(?:bad|awful|terrible|horrible|wrong|broken|useless|annoying|frustrating|disappointing|confusing|slow|ugly)\b",
+    re.IGNORECASE,
+)
+
+
 def _check_regex_negative(text: str) -> bool:
     """Check if any regex-based negative patterns match."""
     return bool(
@@ -342,6 +452,9 @@ def _check_regex_negative(text: str) -> bool:
         or _RE_CORRECTION_COMMAND.search(text)
         or _RE_FRUSTRATION_QUESTION.search(text)
         or _RE_INTENSIFIED_NEGATIVE.search(text)
+        or _RE_EN_PROHIBITION.search(text)
+        or _RE_EN_FRUSTRATION.search(text)
+        or _RE_EN_INTENSIFIED_NEGATIVE.search(text)
     )
 
 
@@ -350,6 +463,8 @@ def _check_regex_strong_negative(text: str) -> bool:
     return bool(
         _RE_FRUSTRATION_QUESTION.search(text)
         or _RE_INTENSIFIED_NEGATIVE.search(text)
+        or _RE_EN_FRUSTRATION.search(text)
+        or _RE_EN_INTENSIFIED_NEGATIVE.search(text)
     )
 
 
@@ -383,9 +498,18 @@ def score_reaction(
     if not feedback and not has_corrections:
         return 0.75
 
+    # Strip negation prefixes that flip sentiment ("not bad" → praise, not negative)
+    _negation_flips = re.compile(
+        r"\bnot\s+(?:bad|awful|terrible|horrible|wrong|the worst)\b"
+        r"|\bnot\s+(?:half\s+)?bad\b"
+        r"|\b(?:isn't|ain't|wasn't)\s+(?:bad|awful|terrible)\b",
+        re.IGNORECASE,
+    )
+    feedback_for_negative = _negation_flips.sub("", feedback)
+
     # Detect tone signals (marker-based)
-    has_strong_rejection = any(marker in feedback for marker in STRONG_REJECTION_MARKERS)
-    has_negative = any(marker in feedback for marker in NEGATIVE_MARKERS)
+    has_strong_rejection = any(marker in feedback_for_negative for marker in STRONG_REJECTION_MARKERS)
+    has_negative = any(marker in feedback_for_negative for marker in NEGATIVE_MARKERS)
     has_strong_praise = any(marker in feedback for marker in STRONG_PRAISE_MARKERS)
     has_praise = any(marker in feedback for marker in PRAISE_MARKERS)
     has_direction = any(marker in feedback for marker in DIRECTION_MARKERS)
