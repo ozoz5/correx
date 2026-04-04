@@ -51,59 +51,7 @@ function ThemeToggle() {
   );
 }
 
-function ProfileSelector() {
-  const { data } = useMemory();
-  const profiles = data.profiles;
-  if (!profiles) return null;
-
-  const profileOptions = [
-    { id: "personal", label: "Personal", icon: "\u{1F331}" },
-    { id: "public", label: "Public", icon: "\u{1F30D}" },
-    { id: "hybrid", label: "Hybrid", icon: "\u{26A1}" },
-  ];
-
-  async function switchProfile(profileId: string) {
-    await fetch("/api/profile", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile: profileId }),
-    });
-  }
-
-  return (
-    <div className="px-4 py-3" style={{ borderTop: "1px solid var(--border)" }}>
-      <p className="text-[8px] tracking-[0.2em] uppercase mb-2" style={{ color: "var(--text-label)" }}>
-        PROFILE
-      </p>
-      <div className="flex gap-1">
-        {profileOptions.map((p) => {
-          const isActive = profiles.active === p.id;
-          return (
-            <button
-              key={p.id}
-              onClick={() => switchProfile(p.id)}
-              className="flex-1 py-1.5 rounded-md text-[9px] font-medium transition-all"
-              style={
-                isActive
-                  ? { background: "var(--bg-subtle)", color: "var(--cyan)", border: `1px solid var(--cyan)` }
-                  : { background: "transparent", color: "var(--text-label)", border: "1px solid var(--border)" }
-              }
-              title={profiles.list[p.id]?.description || ""}
-            >
-              {p.icon}
-            </button>
-          );
-        })}
-      </div>
-      <p className="text-[8px] mt-1.5 font-medium" style={{ color: "var(--text-muted)" }}>
-        {profiles.list[profiles.active]?.name || profiles.active}
-        <span className="ml-1" style={{ color: "var(--text-faint)" }}>
-          ({data.rules.length})
-        </span>
-      </p>
-    </div>
-  );
-}
+// ProfileSelector removed — not implemented in MCP server yet
 
 function LiveIndicator() {
   const { data, lastUpdated } = useMemory();
@@ -196,7 +144,6 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
           })}
         </div>
 
-        <ProfileSelector />
         <LiveIndicator />
       </nav>
 
