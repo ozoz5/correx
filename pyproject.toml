@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "AI Correction OS — persistent human correction memory that makes AI learn from feedback"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
+license = "BSL-1.1"
 authors = [
     {name = "ozoz5"},
 ]

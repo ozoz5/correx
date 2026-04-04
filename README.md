@@ -78,30 +78,32 @@ Meanings:    25 cross-scope patterns extracted
 $ python -m pytest tests/ -q
 ......................................................................
 ..................
-90 passed in 1.49s
+57 passed in 2.03s
 ```
 
 ---
 
 ## The Engram engine
 
-Engram is the memory layer inside CORREX. It operates in three layers:
+Engram is the memory layer inside CORREX. It operates in three learning layers:
 
-| Layer | What it stores | Example |
+| Layer | Signal | What it does |
 |---|---|---|
-| **Rules** | Behavioral preferences | "Always show output before explanation" |
-| **Meanings** | Patterns across rules | "This user values directness" |
-| **Principles** | Deep invariants | "Concrete > abstract, always" |
+| **Surface** (corrections) | User says "wrong" | Extracts rules, promotes to meanings/principles |
+| **Ghost** (anger) | User rejects AI proposal | Clusters rejections, autonomously extracts principles |
+| **Curiosity** (questions) | User asks questions | Tracks knowledge gaps, warns before frustration |
 
 Rules promote only when they appear consistently across sessions.
 Low-confidence rules are automatically demoted.
 Contradicting rules are auto-resolved.
 
-Engram also builds a **personality profile**:
+Engram also builds a **personality profile** (6 dimensions):
 - `metabolism_rate` — how fast you change your mind
 - `reward_pattern` — what makes you say "yes"
 - `avoidance_pattern` — what makes you say "wrong"
 - `digestibility` — abstract vs. concrete preference
+- `curiosity_level` — how often you ask exploratory questions
+- `objective_drift` — whether your goals have shifted
 
 ---
 
@@ -149,6 +151,16 @@ claude mcp add correx \
 
 Restart Claude. CORREX tools appear automatically.
 
+### Enable the auto-learning loop
+
+Copy the template into your project's `CLAUDE.md`:
+
+```bash
+cat /path/to/correx/CLAUDE_TEMPLATE.md >> .claude/CLAUDE.md
+```
+
+This instructs Claude to automatically call CORREX tools when you correct it, ask questions, or complete tasks.
+
 ---
 
 ## The core loop
@@ -184,6 +196,10 @@ save_conversation_turn(
 | `get_personality_profile` | Shows behavioral profile + self-critique proposals |
 | `synthesize_rules` | Generates rule hypotheses from success/failure patterns |
 | `record_growth` | Measures before/after quality improvement |
+| `save_curiosity_signal` | Records a user question (classified by client LLM) |
+| `get_cognitive_map` | Shows knowledge gap map by scope |
+| `save_ghost` | Records a rejected AI proposal for autonomous learning |
+| `get_ghost_principles` | Returns autonomously extracted principles |
 
 ---
 
@@ -217,7 +233,7 @@ correx/
     meaning_synthesis.py   # Engram: rules → meanings → principles
     personality_layer.py   # Behavioral profiling
     llm_scorer.py          # Reaction scoring (Anthropic API / rule-based fallback)
-  tests/                   # 90 tests passing
+  tests/                   # 57 tests passing
 ```
 
 All data stored as JSON in `~/.correx/`. No database required.
