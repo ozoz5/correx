@@ -24,3 +24,8 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# Dashboard (Next.js)
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.claude/

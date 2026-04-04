@@ -205,18 +205,22 @@ save_conversation_turn(
 
 ## Dashboard
 
-A visual dashboard companion exists as a separate project (Next.js).
-It is not included in this repository.
+A visual dashboard for monitoring your AI's growth. Included in `dashboard/`.
 
-The overview shows a **living plant** that grows as your AI learns:
+```bash
+cd dashboard
+npm install
+npm run dev
+```
 
-- Leaves → rules
-- Flowers → meanings
-- Fruits → principles
+Open `http://localhost:3000`. Point it at your CORREX data directory (`~/.correx/` by default).
 
-The plant grows slowly. Like your AI.
-
-> Dashboard open-source release: planned.
+Features:
+- **Tamagotchi** — a pixel art creature that evolves with your AI's personality
+- **Policies / Principles / Rules** — knowledge hierarchy visualization
+- **Growth** — before/after quality measurements
+- **Memory Map** — neural network view of rules and connections
+- **History** — correction timeline with reaction scores
 
 ---
 
