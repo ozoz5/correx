@@ -32,6 +32,14 @@ from .personality_layer import (
     detect_interventions,
     format_personality_guidance,
 )
+from .narrative_montage import (
+    NarrativeState,
+    build_narrative_template,
+    compute_policy_fingerprint,
+    from_dict as narrative_from_dict,
+    needs_regeneration,
+    to_dict as narrative_to_dict,
+)
 from .schemas import Meaning, Policy, Principle, Tension
 from .curiosity_engine import (
     build_cognitive_map,
@@ -56,15 +64,7 @@ from .secret_store import delete_secure_secret, get_secure_secret, set_secure_se
 from .training_dataset import export_mlx_lm_dataset
 
 
-def _char_bigram_similarity(a: str, b: str) -> float:
-    """Char-bigram Jaccard similarity for Japanese text (no tokenizer needed)."""
-    if not a or not b:
-        return 0.0
-    sa = {a[i:i+2] for i in range(len(a) - 1)} if len(a) > 1 else {a}
-    sb = {b[i:i+2] for i in range(len(b) - 1)} if len(b) > 1 else {b}
-    intersection = sa & sb
-    union = sa | sb
-    return len(intersection) / len(union) if union else 0.0
+from .text_similarity import ngram_jaccard as _char_bigram_similarity  # noqa: E402
 
 
 def _deduplicate_ghost_principles(
@@ -222,18 +222,7 @@ class CorrexService:
         correction text overlaps with a dormant rule's instruction,
         the law wasn't enough — wake the specific rule.
         """
-        import json as _json
-
-        rules_path = self.history.base_dir / "preference_rules.json"
-        if not rules_path.exists():
-            return
-
-        try:
-            data = _json.loads(rules_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError, UnicodeDecodeError):
-            return
-
-        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        items = self.history.load_preference_rules_raw()
         dormant = [r for r in items if r.get("status") == "dormant"]
         if not dormant:
             return
@@ -259,12 +248,7 @@ class CorrexService:
                 awakened += 1
 
         if awakened > 0:
-            if isinstance(data, dict):
-                data["items"] = items
-            try:
-                self.history._atomic_write_json(rules_path, items)
-            except (OSError, AttributeError):
-                pass
+            self.history.write_preference_rules_raw(items)
 
         # Also awaken dormant ghost principles
         self._awaken_dormant_ghost_principles(turn)
@@ -640,33 +624,21 @@ class CorrexService:
 
         # --- P2: Laws (禁止 + 推奨 + 固有原則) ---
         law_lines: list[str] = []
-        laws_path = self.history.base_dir / "ghost_universal_laws.json"
-        if laws_path.exists():
-            try:
-                raw = _json.loads(laws_path.read_text(encoding="utf-8"))
-                items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
-                if items:
-                    law_lines.append("[禁止法理]")
-                    for i, law in enumerate(items, 1):
-                        t = law.get("law", "") if isinstance(law, dict) else str(law)
-                        if t:
-                            law_lines.append(f"  {i}. {t}")
-            except (ValueError, OSError, KeyError, UnicodeDecodeError):
-                pass
+        universal_laws = self.history.load_ghost_universal_laws()
+        if universal_laws:
+            law_lines.append("[禁止法理]")
+            for i, law in enumerate(universal_laws, 1):
+                t = law.get("law", "") if isinstance(law, dict) else str(law)
+                if t:
+                    law_lines.append(f"  {i}. {t}")
 
-        pos_path = self.history.base_dir / "ghost_positive_laws.json"
-        if pos_path.exists():
-            try:
-                raw = _json.loads(pos_path.read_text(encoding="utf-8"))
-                items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
-                if items:
-                    law_lines.append("[推奨法理]")
-                    for i, law in enumerate(items, 1):
-                        t = law.get("law", "") if isinstance(law, dict) else str(law)
-                        if t:
-                            law_lines.append(f"  +{i}. {t}")
-            except (ValueError, OSError, KeyError, UnicodeDecodeError):
-                pass
+        positive_laws = self.history.load_ghost_positive_laws()
+        if positive_laws:
+            law_lines.append("[推奨法理]")
+            for i, law in enumerate(positive_laws, 1):
+                t = law.get("law", "") if isinstance(law, dict) else str(law)
+                if t:
+                    law_lines.append(f"  +{i}. {t}")
 
         # Tension resolution rule (compact)
         if law_lines:
@@ -807,38 +779,26 @@ class CorrexService:
         has_positive = False
 
         # 1. Universal laws (constraints)
-        laws_path = self.history.base_dir / "ghost_universal_laws.json"
-        if laws_path.exists():
-            try:
-                raw_laws = _json.loads(laws_path.read_text(encoding="utf-8"))
-                laws = raw_laws["items"] if isinstance(raw_laws, dict) and "items" in raw_laws else raw_laws
-                if laws:
-                    law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
-                    for i, law in enumerate(laws, 1):
-                        text = law.get("law", "") if isinstance(law, dict) else str(law)
-                        if text:
-                            law_lines.append(f"  {i}. {text}")
-                    sections.append("\n".join(law_lines))
-                    has_laws = True
-            except (ValueError, OSError, KeyError, UnicodeDecodeError):
-                pass
+        laws = self.history.load_ghost_universal_laws()
+        if laws:
+            law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
+            for i, law in enumerate(laws, 1):
+                text = law.get("law", "") if isinstance(law, dict) else str(law)
+                if text:
+                    law_lines.append(f"  {i}. {text}")
+            sections.append("\n".join(law_lines))
+            has_laws = True
 
         # 2. Positive laws (drivers)
-        pos_path = self.history.base_dir / "ghost_positive_laws.json"
-        if pos_path.exists():
-            try:
-                raw_pos = _json.loads(pos_path.read_text(encoding="utf-8"))
-                pos_laws = raw_pos["items"] if isinstance(raw_pos, dict) and "items" in raw_pos else raw_pos
-                if pos_laws:
-                    pos_lines = ["[推奨法理 — 肯定反応から抽出された推進基準]"]
-                    for i, law in enumerate(pos_laws, 1):
-                        text = law.get("law", "") if isinstance(law, dict) else str(law)
-                        if text:
-                            pos_lines.append(f"  +{i}. {text}")
-                    sections.append("\n".join(pos_lines))
-                    has_positive = True
-            except (ValueError, OSError, KeyError, UnicodeDecodeError):
-                pass
+        pos_laws = self.history.load_ghost_positive_laws()
+        if pos_laws:
+            pos_lines = ["[推奨法理 — 肯定反応から抽出された推進基準]"]
+            for i, law in enumerate(pos_laws, 1):
+                text = law.get("law", "") if isinstance(law, dict) else str(law)
+                if text:
+                    pos_lines.append(f"  +{i}. {text}")
+            sections.append("\n".join(pos_lines))
+            has_positive = True
 
         # 3. Tension resolution instruction
         if has_laws and has_positive:
@@ -872,10 +832,29 @@ class CorrexService:
     # Policy layer
     # ------------------------------------------------------------------
 
+    # Thresholds for automatic policy activation (data-driven).
+    # A proposed policy becomes active when it meets BOTH conditions.
+    POLICY_AUTO_ACTIVE_EVIDENCE = 10    # minimum evidence_count
+    POLICY_AUTO_ACTIVE_LAWS = 2         # minimum source_law_ids count
+
     def save_policy(self, policy: Policy) -> Policy:
-        """Save or update a policy."""
+        """Save or update a policy.
+
+        Auto-activation: proposed policies with sufficient evidence
+        (evidence_count >= 10 AND source_law_ids >= 2) are automatically
+        promoted to active.  No human approval needed — this is the
+        data-driven design of the 超個人 system.
+        """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M")
+
+        # Auto-activate proposed policies that meet evidence thresholds
+        if policy.maturity == "proposed":
+            evidence_ok = policy.evidence_count >= self.POLICY_AUTO_ACTIVE_EVIDENCE
+            laws_ok = len(policy.source_law_ids or []) >= self.POLICY_AUTO_ACTIVE_LAWS
+            if evidence_ok and laws_ok:
+                policy.maturity = "active"
+
         policies = self.history.load_policies()
         existing = next((p for p in policies if p.id == policy.id), None)
         if existing:
@@ -907,20 +886,10 @@ class CorrexService:
 
         # Collect law texts
         laws: list[str] = []
-        for law_file in ["ghost_universal_laws.json", "ghost_positive_laws.json"]:
-            import json as _json
-            path = self.history.base_dir / law_file
-            if path.exists():
-                try:
-                    raw = _json.loads(path.read_text(encoding="utf-8"))
-                    # Handle both bare list and {"schema_version":..., "items":[...]}
-                    items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
-                    for item in (items if isinstance(items, list) else []):
-                        text = item.get("law", "") if isinstance(item, dict) else str(item)
-                        if text:
-                            laws.append(text)
-                except Exception:
-                    pass
+        for law_item in self.history.load_ghost_universal_laws() + self.history.load_ghost_positive_laws():
+            text = law_item.get("law", "") if isinstance(law_item, dict) else str(law_item)
+            if text:
+                laws.append(text)
 
         # Collect policy core texts
         policies_text = [p.core for p in self.history.load_policies() if p.maturity == "active"]
@@ -945,23 +914,13 @@ class CorrexService:
 
     def _forget_stale_rules(self) -> int:
         """Permanently delete preference rules dormant for 30+ days."""
-        import json as _json
-
-        rules_path = self.history.base_dir / "preference_rules.json"
-        if not rules_path.exists():
-            return 0
-        try:
-            raw = _json.loads(rules_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
+        items = self.history.load_preference_rules_raw()
+        if not items:
             return 0
 
-        items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
         remaining, forgotten = forget_stale_rules(items)
         if forgotten > 0:
-            try:
-                self.history._atomic_write_json(rules_path, remaining)
-            except (OSError, AttributeError):
-                pass
+            self.history.write_preference_rules_raw(remaining)
         return forgotten
 
     def _dormant_preference_rules(
@@ -975,18 +934,11 @@ class CorrexService:
         Specific rules (no retrograde tag, meaningful length) are kept.
         """
         from .dormancy import check_coverage
-        import json as _json
 
-        rules_path = self.history.base_dir / "preference_rules.json"
-        if not rules_path.exists():
+        items = self.history.load_preference_rules_raw()
+        if not items:
             return 0
 
-        try:
-            raw = _json.loads(rules_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            return 0
-
-        items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
         retired = 0
 
         for rule in items:
@@ -1008,10 +960,7 @@ class CorrexService:
                 retired += 1
 
         if retired > 0:
-            try:
-                self.history._atomic_write_json(rules_path, items)
-            except (OSError, AttributeError):
-                pass
+            self.history.write_preference_rules_raw(items)
 
         return retired
 
@@ -1033,104 +982,116 @@ class CorrexService:
         return tensions
 
     def detect_tension_candidates(self) -> list[dict]:
-        """Server-side lightweight contradiction detection.
+        """Server-side lightweight candidate generation for contradiction detection.
 
-        Scans promoted rules + ghost principles for pairs that share topic
-        keywords but contain opposing directive words.  Returns candidate
-        pairs for the client LLM to refine and extract boundaries.
+        Generates candidate pairs for the client LLM to judge.  Server does
+        cheap filtering (keyword overlap + scope match); LLM does the real
+        contradiction judgment using full context understanding.
 
-        No LLM needed — pure keyword heuristics.
+        No LLM needed on server — inverted architecture (same as Ghost sublimation).
         """
         import re
-        from datetime import datetime as _dt
 
-        # Collect all directive statements
+        # --- Collect statements with scope metadata ---
         rules = self.history.load_preference_rules()
-        promoted = [r for r in rules if getattr(r, "status", "") == "promoted"]
-        statements: list[tuple[str, str]] = []  # (id, text)
-        for r in promoted:
-            statements.append((r.id, r.statement or r.instruction))
+        # Include all rules (not just promoted) — LLM needs broader context
+        statements: list[tuple[str, str, str]] = []  # (id, text, scope)
+        for r in rules:
+            text = r.statement or r.instruction
+            if text:
+                statements.append((r.id, text, getattr(r, "applies_to_scope", "") or ""))
 
-        # Also include ghost principles
+        # Also include ghost principles (no scope info)
         ghost_principles = self.get_fired_ghost_principles()
         for i, gp in enumerate(ghost_principles):
-            statements.append((f"ghost-{i}", gp))
+            statements.append((f"ghost-{i}", gp, ""))
 
-        # Opposing directive markers
-        positive_markers = {"しろ", "せよ", "やれ", "実行", "即", "自発", "動け", "確認", "出せ", "直せ"}
-        negative_markers = {"するな", "やるな", "禁止", "しない", "避け", "控え", "超えるな", "変えるな", "復唱するな"}
-
-        # Tokenize statements into keyword sets (Japanese-aware)
+        # --- Keyword extraction (Japanese-aware) ---
         _PARTICLE_RE = re.compile(
-            r'[、。・\s\u3000（）「」/,.\-]|'  # punctuation
-            r'(?<=[^\u3040-\u309F])[をにはがでとのもへから]{1,2}(?=[^\u3040-\u309F])|'  # particles between non-hiragana
-            r'(?<=.)[をにはがでとのもへ](?=.)'  # single particles mid-word
+            r'[、。・\s\u3000（）「」/,.\-]|'
+            r'(?<=[^\u3040-\u309F])[をにはがでとのもへから]{1,2}(?=[^\u3040-\u309F])|'
+            r'(?<=.)[をにはがでとのもへ](?=.)'
         )
 
+        # Verb endings and generic words to exclude from overlap matching
+        _STOP_WORDS = {
+            # Verb endings (命令形/禁止形 — match almost all rules)
+            "しろ", "せよ", "やれ", "するな", "やるな", "出せ", "直せ",
+            "動け", "避けよ", "控え", "走るな", "行け", "超えるな",
+            "変えるな", "復唱するな", "実行しろ", "確認しろ", "記録しろ",
+            "提案するな", "安心するな", "忘れるな",
+            # Generic nouns (appear in many rules, low discriminative power)
+            "ユーザー", "タスク", "作業", "実行", "確認", "提案",
+            "コード", "修正", "バグ", "テスト", "セッション",
+            "ファイル", "データ", "結果", "報告", "指示",
+            "必ず", "即座", "自発", "自動", "最優先", "禁止",
+            "場合", "状態", "問題", "対応", "処理", "機能",
+            "ルール", "メモリ", "記録", "保存", "設定",
+        }
+
         def extract_keywords(text: str) -> set[str]:
-            # Split on particles and punctuation
             tokens = _PARTICLE_RE.split(text)
             result = set()
             for t in tokens:
                 t = t.strip()
                 if len(t) >= 2:
                     result.add(t)
-                    # Also add sub-tokens for compound words
                     for sub in re.split(r'[をにはがでとのもへ]', t):
                         sub = sub.strip()
                         if len(sub) >= 2:
                             result.add(sub)
-            return result
+            return result - _STOP_WORDS
 
-        def has_positive(text: str) -> bool:
-            return any(m in text for m in positive_markers)
-
-        def has_negative(text: str) -> bool:
-            return any(m in text for m in negative_markers)
-
-        # Find candidate pairs
-        candidates = []
+        # --- Find candidate pairs ---
+        candidates: list[dict] = []
         existing = self.history.load_tensions()
         existing_pairs = {(t.rule_a_id, t.rule_b_id) for t in existing}
         existing_pairs |= {(t.rule_b_id, t.rule_a_id) for t in existing}
 
-        for i, (id_a, text_a) in enumerate(statements):
+        for i, (id_a, text_a, scope_a) in enumerate(statements):
             kw_a = extract_keywords(text_a)
-            for j, (id_b, text_b) in enumerate(statements):
+            if not kw_a:
+                continue
+            for j, (id_b, text_b, scope_b) in enumerate(statements):
                 if j <= i:
                     continue
                 if (id_a, id_b) in existing_pairs:
                     continue
 
                 kw_b = extract_keywords(text_b)
-                overlap = kw_a & kw_b
-
-                # Need shared keywords and opposing directives.
-                # Filter out overly generic shared words.
-                _GENERIC_WORDS = {
-                    "ユーザー", "タスク", "作業", "実行", "確認", "提案",
-                    "コード", "修正", "バグ", "テスト", "セッション",
-                    "ファイル", "データ", "結果", "報告", "指示",
-                }
-                meaningful_overlap = overlap - _GENERIC_WORDS
-                # Require 1+ meaningful keyword, or 2+ any keywords
-                if not meaningful_overlap and len(overlap) < 2:
+                if not kw_b:
                     continue
 
-                a_pos, a_neg = has_positive(text_a), has_negative(text_a)
-                b_pos, b_neg = has_positive(text_b), has_negative(text_b)
+                overlap = kw_a & kw_b
 
-                # Opposing: one positive + one negative, OR both positive but
-                # the overlapping keyword context suggests opposition
-                if (a_pos and b_neg) or (a_neg and b_pos):
-                    candidates.append({
-                        "rule_a_id": id_a,
-                        "rule_a_text": text_a,
-                        "rule_b_id": id_b,
-                        "rule_b_text": text_b,
-                        "shared_keywords": sorted(overlap),
-                        "opposition_type": "directive",
-                    })
+                # Scoring: scope match is a strong signal, keyword overlap adds weight
+                scope_match = bool(scope_a and scope_b and scope_a == scope_b)
+                overlap_count = len(overlap)
+
+                # Require: 2+ meaningful keyword overlap, OR scope match + 1+ overlap
+                if scope_match and overlap_count >= 1:
+                    score = overlap_count + 5  # scope match bonus
+                elif overlap_count >= 2:
+                    score = overlap_count
+                else:
+                    continue
+
+                candidates.append({
+                    "rule_a_id": id_a,
+                    "rule_a_text": text_a,
+                    "rule_b_id": id_b,
+                    "rule_b_text": text_b,
+                    "shared_keywords": sorted(overlap),
+                    "scope_match": scope_match,
+                    "_score": score,
+                })
+
+        # Sort by score descending, cap at 50
+        candidates.sort(key=lambda c: c["_score"], reverse=True)
+        candidates = candidates[:50]
+        # Remove internal score field
+        for c in candidates:
+            del c["_score"]
 
         return candidates
 
@@ -1192,6 +1153,95 @@ class CorrexService:
         lines.append("上記の各ペアは矛盾ではなく、状況依存の切り替え。")
         lines.append("境界条件を見て、今の場面でどちらに重みがある��判断せよ。")
         return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Narrative Montage
+    # ------------------------------------------------------------------
+
+    def check_narrative_status(self) -> dict:
+        """Return current narrative and whether regeneration is needed.
+
+        The client LLM calls this to decide whether to generate a new
+        5-line personality narrative from policy montage data.
+        """
+        policies = self.history.load_policies()
+        tensions = self.history.load_tensions()
+        stored_raw = self.history.load_narrative()
+        stored = narrative_from_dict(stored_raw) if stored_raw else None
+        current_fp = compute_policy_fingerprint(policies)
+        regen = needs_regeneration(current_fp, stored)
+
+        # Gather context for LLM regeneration
+        active_policies = [p for p in policies if p.maturity == "active"]
+        profile = self._get_personality_snapshot()
+
+        return {
+            "needs_regeneration": regen,
+            "current_narrative": stored.narrative_text if stored else "",
+            "fingerprint": current_fp,
+            "stored_fingerprint": stored.policy_fingerprint if stored else "",
+            "policy_count": len(active_policies),
+            "policies": [{"id": p.id, "title": p.title, "core": p.core, "evidence_count": p.evidence_count} for p in active_policies],
+            "tensions": [{"boundary": t.boundary, "signal": t.signal} for t in tensions if t.status == "active" and t.boundary],
+            "personality": {
+                "metabolism": profile.get("metabolism_rate", 0.5),
+                "digestibility": profile.get("digestibility", 0.5),
+                "reward_keywords": profile.get("reward_keywords", []),
+                "avoidance_keywords": profile.get("avoidance_keywords", []),
+            },
+        }
+
+    def _get_personality_snapshot(self) -> dict:
+        """Load cached personality or compute fresh."""
+        cached = self.history.load_personality()
+        if cached:
+            return cached
+        turns = self.history.load_conversation_turns()
+        rules = self.history.load_preference_rules()
+        profile = compute_personality_profile(turns, rules)
+        return asdict(profile)
+
+    def save_narrative(self, *, narrative_text: str, method: str = "llm") -> dict:
+        """Persist a generated narrative and return clipboard text."""
+        from datetime import datetime
+
+        policies = self.history.load_policies()
+        active = [p for p in policies if p.maturity == "active"]
+        fp = compute_policy_fingerprint(policies)
+
+        state = NarrativeState(
+            narrative_text=narrative_text,
+            policy_fingerprint=fp,
+            generated_at=datetime.now().strftime("%Y/%m/%d %H:%M"),
+            generation_method=method,
+            source_policy_ids=[p.id for p in active],
+        )
+        self.history.write_narrative(narrative_to_dict(state))
+
+        return {
+            "ok": True,
+            "narrative": narrative_text,
+            "fingerprint": fp,
+            "clipboard_text": (
+                f"## お前が仕えている人間\n{narrative_text}\n\n"
+                "↑ claude.aiの個人設定に貼ってください。"
+            ),
+        }
+
+    def build_narrative_from_template(self) -> str:
+        """Generate narrative from template (0 LLM cost)."""
+        policies = self.history.load_policies()
+        tensions = self.history.load_tensions()
+        profile = self._get_personality_snapshot()
+
+        return build_narrative_template(
+            policies,
+            tensions,
+            metabolism=profile.get("metabolism_rate", 0.5),
+            digestibility=profile.get("digestibility", 0.5),
+            reward_keywords=profile.get("reward_keywords", []),
+            avoidance_keywords=profile.get("avoidance_keywords", []),
+        )
 
     def _build_policy_guidance(self) -> str:
         """Build guidance from active policies for injection into context.
@@ -1589,11 +1639,7 @@ class CorrexService:
         trajectory_dict["sublimated_principle"] = universal
 
         # Stage 2: Check if this fits an existing law
-        laws_path = self.history.base_dir / "ghost_universal_laws.json"
-        try:
-            laws = _json.loads(laws_path.read_text(encoding="utf-8")) if laws_path.exists() else []
-        except (ValueError, OSError):
-            laws = []
+        laws = self.history.load_ghost_universal_laws()
 
         if laws:
             law_list = "\n".join(f"{i+1}. {l.get('law', '')}" for i, l in enumerate(laws))
@@ -1632,34 +1678,23 @@ class CorrexService:
                 "auto_generated": True,
             }]
 
-        try:
-            laws_path.write_text(_json.dumps(laws, ensure_ascii=False, indent=2))
-        except OSError:
-            pass
+        self.history.write_ghost_universal_laws(laws)
 
         # Re-evaluate dormant rules: new/strengthened law may cover more rules
         self._refresh_dormant_from_laws(laws, universal)
 
     def _refresh_dormant_from_laws(self, laws: list[dict], new_principle: str) -> None:
         """After a law is added or strengthened, check if candidate rules should sleep."""
-        import json as _json
-
-        rules_path = self.history.base_dir / "preference_rules.json"
-        if not rules_path.exists():
-            return
-        try:
-            data = _json.loads(rules_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError, UnicodeDecodeError):
+        items = self.history.load_preference_rules_raw()
+        if not items:
             return
 
-        items = data["items"] if isinstance(data, dict) and "items" in data else data
         candidates = [r for r in items if r.get("status") == "candidate"]
         if not candidates:
             return
 
         # Word-overlap check: if the new principle shares 3+ content words
         # with a candidate rule, that rule is now covered.
-        # Use .split() for word-level comparison (NOT set(text) which gives chars).
         import re as _re
         _word_pat = _re.compile(r"[ぁ-んァ-ンー一-龯]{2,}|[a-zA-Z]{3,}")
         new_words = set(_word_pat.findall(new_principle.lower()))
@@ -1673,12 +1708,7 @@ class CorrexService:
                 dormanted += 1
 
         if dormanted > 0:
-            if isinstance(data, dict):
-                data["items"] = items
-            try:
-                rules_path.write_text(_json.dumps(data, ensure_ascii=False, indent=2))
-            except OSError:
-                pass
+            self.history.write_preference_rules_raw(items)
 
     # ------------------------------------------------------------------
     # Client-side sublimation support (LLM-free server)
@@ -1771,11 +1801,7 @@ class CorrexService:
 
         # Handle universal law if provided
         if universal_law:
-            laws_path = self.history.base_dir / "ghost_universal_laws.json"
-            try:
-                laws = _json.loads(laws_path.read_text(encoding="utf-8")) if laws_path.exists() else []
-            except (ValueError, OSError):
-                laws = []
+            laws = self.history.load_ghost_universal_laws()
 
             if law_match_index > 0 and law_match_index <= len(laws):
                 # Absorb into existing law
@@ -1793,10 +1819,7 @@ class CorrexService:
                     "client_sublimated": True,
                 })
 
-            try:
-                laws_path.write_text(_json.dumps(laws, ensure_ascii=False, indent=2))
-            except OSError:
-                pass
+            self.history.write_ghost_universal_laws(laws)
 
             # Re-evaluate dormant rules
             self._refresh_dormant_from_laws(laws, universal_law)
@@ -1826,18 +1849,9 @@ class CorrexService:
 
         This feeds into the existing promotion/demotion lifecycle.
         """
-        import json as _json
-
-        rules_path = self.history.base_dir / "preference_rules.json"
-        if not rules_path.exists():
-            return {"ok": False, "error": "No rules file found"}
-
-        try:
-            data = _json.loads(rules_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            return {"ok": False, "error": "Failed to read rules"}
-
-        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        items = self.history.load_preference_rules_raw()
+        if not items:
+            return {"ok": False, "error": "No rules found"}
         rules_by_id = {r.get("id", ""): r for r in items}
 
         updated = 0
@@ -1883,15 +1897,7 @@ class CorrexService:
             updated += 1
 
         if updated > 0:
-            if isinstance(data, dict):
-                data["items"] = items
-            try:
-                rules_path.write_text(
-                    _json.dumps(data, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
+            self.history.write_preference_rules_raw(items)
 
         return {
             "ok": True,
@@ -2067,16 +2073,12 @@ class CorrexService:
                 unique.append(p)
 
         # --- fuzzy dedup via char-bigram Jaccard ---
-        def _bigrams(text: str) -> set[str]:
-            t = re.sub(r"[\s、。]", "", text)
-            if len(t) < 2:
-                return set()
-            return {t[i:i+2] for i in range(len(t) - 1)}
+        from .text_similarity import char_ngrams as _ts_ngrams
 
         deduped: list[str] = []
         deduped_bigrams: list[set[str]] = []
         for p in unique:
-            bg = _bigrams(p)
+            bg = _ts_ngrams(p, 2, particles=True)
             if not bg:
                 deduped.append(p)
                 deduped_bigrams.append(bg)

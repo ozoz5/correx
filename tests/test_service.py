@@ -823,10 +823,8 @@ class CorrexServiceTest(unittest.TestCase):
             updated = svc.history.load_ghost_trajectories()
             self.assertEqual(updated[0]["sublimated_principle"], "推測で数字を出すな")
 
-            # Verify law was created
-            import json
-            laws_path = svc.history.base_dir / "ghost_universal_laws.json"
-            laws = json.loads(laws_path.read_text())
+            # Verify law was created (via locked API)
+            laws = svc.history.load_ghost_universal_laws()
             self.assertEqual(len(laws), 1)
             self.assertEqual(laws[0]["law"], "事実確認を怠るな")
             self.assertTrue(laws[0].get("client_sublimated"))
@@ -871,8 +869,8 @@ class CorrexServiceTest(unittest.TestCase):
             self.assertEqual(result["promoted"], 1)  # good-rule: 3 successes + conf >= 0.6
             self.assertEqual(result["demoted"], 1)   # bad-rule: 5 failures + < 2 successes
 
-            # Verify file was updated
-            updated = json.loads(rules_path.read_text())
+            # Verify file was updated (via locked API)
+            updated = svc.history.load_preference_rules_raw()
             good = next(r for r in updated if r["id"] == "pref-good-rule")
             bad = next(r for r in updated if r["id"] == "pref-bad-rule")
             self.assertEqual(good["status"], "promoted")
@@ -882,25 +880,27 @@ class CorrexServiceTest(unittest.TestCase):
 
 
     def test_tension_detect_and_save_roundtrip(self):
-        """Tension detection finds opposing directive pairs; save persists them."""
+        """Tension detection finds candidate pairs; save persists them."""
         with TemporaryDirectory() as temp_dir:
             svc = CorrexService(Path(temp_dir) / "memory")
 
-            # Create two opposing promoted rules with shared non-generic keyword
+            # Create two rules with meaningful keyword overlap (same scope)
             rules = [
                 {
                     "id": "pref-confirm-first",
-                    "statement": "クライアントLLMで方針を確認してから動け",
-                    "instruction": "クライアントLLMで方針を確認してから動け",
+                    "statement": "設計方針をレビューしてから実装を開始する",
+                    "instruction": "設計方針をレビューしてから実装を開始する",
                     "status": "promoted",
                     "evidence_count": 3,
+                    "applies_to_scope": "development",
                 },
                 {
                     "id": "pref-act-immediately",
-                    "statement": "クライアントLLMの復唱するな即座に実行しろ",
-                    "instruction": "クライアントLLMの復唱するな即座に実行しろ",
+                    "statement": "設計方針に固執せず素早く実装してフィードバックを得る",
+                    "instruction": "設計方針に固執せず素早く実装してフィードバックを得る",
                     "status": "promoted",
                     "evidence_count": 3,
+                    "applies_to_scope": "development",
                 },
             ]
             svc.history._atomic_write_json(
@@ -936,6 +936,106 @@ class CorrexServiceTest(unittest.TestCase):
             guidance = svc.build_guidance_context(task_title="test")
             self.assertIn("判断境界", guidance)
             self.assertIn("方針が不明なら確認", guidance)
+
+
+    def test_narrative_fingerprint_detects_policy_change(self):
+        """Fingerprint changes when policy evidence count shifts significantly."""
+        from correx.narrative_montage import compute_policy_fingerprint, needs_regeneration, NarrativeState
+        from correx.schemas import Policy
+
+        p1 = Policy(id="pol-a", title="A", core="a", why="a", evidence_count=10, maturity="active")
+        p2 = Policy(id="pol-b", title="B", core="b", why="b", evidence_count=20, maturity="active")
+
+        fp1 = compute_policy_fingerprint([p1, p2])
+
+        # Small change (< 10) — fingerprint should NOT change
+        p2_small = Policy(id="pol-b", title="B", core="b", why="b", evidence_count=25, maturity="active")
+        fp2 = compute_policy_fingerprint([p1, p2_small])
+        self.assertEqual(fp1, fp2)
+
+        # Large change (>= 10) — fingerprint SHOULD change
+        p2_big = Policy(id="pol-b", title="B", core="b", why="b", evidence_count=30, maturity="active")
+        fp3 = compute_policy_fingerprint([p1, p2_big])
+        self.assertNotEqual(fp1, fp3)
+
+        # needs_regeneration with no stored state
+        self.assertTrue(needs_regeneration(fp1, None))
+
+        # needs_regeneration with matching fingerprint
+        stored = NarrativeState(narrative_text="test", policy_fingerprint=fp1)
+        self.assertFalse(needs_regeneration(fp1, stored))
+
+        # needs_regeneration with different fingerprint
+        self.assertTrue(needs_regeneration(fp3, stored))
+
+    def test_narrative_template_produces_5_lines(self):
+        """Template narrative has exactly 5 lines."""
+        from correx.narrative_montage import build_narrative_template
+        from correx.schemas import Policy, Tension
+
+        policies = [
+            Policy(id="pol-understand", title="理解が行動に先行する", core="確信のない行動は状況を悪化させる", why="200件の修正", evidence_count=80, maturity="active"),
+            Policy(id="pol-build", title="動くものを作り続けろ", core="完璧を待たず段階的に改善", why="推奨法理", evidence_count=25, maturity="active"),
+        ]
+        tensions = [
+            Tension(id="t-1", rule_a_id="a", rule_a_text="理解してから", rule_b_id="b", rule_b_text="動け",
+                    boundary="不確実なら確認、確信あれば即動け", signal="確信度", status="active"),
+        ]
+
+        narrative = build_narrative_template(
+            policies, tensions,
+            metabolism=0.7,
+            digestibility=0.3,
+            reward_keywords=["実装", "完成", "動く"],
+            avoidance_keywords=["勝手に", "壊した", "確認なし"],
+        )
+
+        lines = narrative.strip().split("\n")
+        self.assertEqual(len(lines), 5)
+        self.assertTrue(all(len(line) > 0 for line in lines))
+
+    def test_narrative_roundtrip(self):
+        """save_narrative → load → check_narrative_status roundtrip."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+
+            # No narrative initially
+            status = svc.check_narrative_status()
+            self.assertTrue(status["needs_regeneration"])
+            self.assertEqual(status["current_narrative"], "")
+
+            # Save a narrative
+            result = svc.save_narrative(
+                narrative_text="テスト用の5行ナラティブ\n2行目\n3行目\n4行目\n5行目",
+                method="test",
+            )
+            self.assertTrue(result["ok"])
+            self.assertIn("clipboard_text", result)
+
+            # Check again — should NOT need regeneration (no policy change)
+            status2 = svc.check_narrative_status()
+            self.assertFalse(status2["needs_regeneration"])
+            self.assertEqual(status2["current_narrative"], "テスト用の5行ナラティブ\n2行目\n3行目\n4行目\n5行目")
+
+    def test_narrative_inject_into_claude_md(self):
+        """inject_narrative_into_text inserts/replaces correctly."""
+        from correx.narrative_montage import inject_narrative_into_text, MARKER_BEGIN, MARKER_END
+
+        # Insert into file with no markers
+        original = "# My Settings\nSome content here."
+        result = inject_narrative_into_text(original, "Line 1\nLine 2")
+        self.assertTrue(result.startswith(MARKER_BEGIN))
+        self.assertIn("Line 1\nLine 2", result)
+        self.assertIn("# My Settings", result)
+
+        # Replace existing markers
+        result2 = inject_narrative_into_text(result, "Updated narrative")
+        self.assertIn("Updated narrative", result2)
+        self.assertNotIn("Line 1", result2)
+        self.assertIn("# My Settings", result2)
+        # Should have exactly one pair of markers
+        self.assertEqual(result2.count(MARKER_BEGIN), 1)
+        self.assertEqual(result2.count(MARKER_END), 1)
 
 
 if __name__ == "__main__":

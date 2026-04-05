@@ -616,16 +616,20 @@ def create_mcp_server(
 
     @mcp.tool()
     def detect_tension_candidates() -> dict[str, Any]:
-        """Detect contradicting rule pairs for the client LLM to refine.
+        """Detect contradiction candidates for the client LLM to judge.
 
-        Server-side heuristic: finds pairs of promoted rules / ghost principles
-        that share topic keywords but have opposing directives (しろ vs するな).
+        Server-side: generates candidate pairs using keyword overlap and scope
+        matching.  No opposition judgment — that's the client LLM's job.
 
         The client LLM should:
-        1. Review each candidate pair
-        2. Determine if it's a genuine contradiction (not just different scopes)
-        3. Extract the boundary condition: "when A applies, when B applies"
-        4. Call save_tension() with the boundary
+        1. Read each pair's full text in context
+        2. Judge: would applying both rules in the SAME situation produce
+           opposite actions?  If yes → genuine contradiction
+        3. If different topics/scopes → skip (false positive)
+        4. For genuine contradictions, extract:
+           - boundary: "when A applies, when B applies"
+           - signal: what observable cue triggers the switch
+        5. Call save_tension() with the boundary and signal
 
         This is the Contradiction Montage pipeline — extracting *judgment*
         (when to switch between rules) rather than just rules themselves.
@@ -636,9 +640,12 @@ def create_mcp_server(
             "count": len(candidates),
             "candidates": candidates,
             "instructions": (
-                "Review each pair. For genuine contradictions, extract the "
-                "boundary condition (いつAで、いつBか) and call save_tension(). "
-                "Skip pairs that are merely about different scopes/topics."
+                "各ペアを文脈込みで読み、以下を判定せよ:\n"
+                "1. 同一状況で両方適用すると逆の行動になるか？ → 真の矛盾\n"
+                "2. 別の話題・スコープなら → 除外（偽陽性）\n"
+                "真の矛盾の場合、境界条件（いつAで、いつBか）と"
+                "切替シグナル（何を見てA/Bを判断するか）を抽出して "
+                "save_tension() を呼べ。"
             ),
         }
 
@@ -762,6 +769,41 @@ def create_mcp_server(
             "intervention_count": len(interventions),
             "self_overcome_proposals": service.self_overcome(),
         }
+
+    @mcp.tool()
+    def check_narrative_status() -> dict[str, Any]:
+        """Check if the user personality narrative needs regeneration.
+
+        Returns the current narrative, whether regeneration is needed,
+        and raw policy/personality data for the client LLM to generate
+        a new 5-line narrative if needed.
+
+        Call this at session start or after policy changes. If
+        needs_regeneration is True, generate a 5-line narrative from
+        the returned data and call save_narrative() with the result.
+        """
+        return service.check_narrative_status()
+
+    @mcp.tool()
+    def save_narrative(
+        narrative_text: str,
+        method: str = "llm",
+    ) -> dict[str, Any]:
+        """Save a generated personality narrative.
+
+        Called after the client LLM generates a 5-line personality
+        narrative from check_narrative_status() data.  The narrative
+        describes WHO the user is — their decision style, values,
+        contradictions, growth edges, and working preferences.
+
+        The narrative is persisted and auto-written to CLAUDE.md at
+        session start.  Returns clipboard_text for manual paste into
+        claude.ai personal settings.
+        """
+        return service.save_narrative(
+            narrative_text=narrative_text,
+            method=method,
+        )
 
     @mcp.tool()
     def synthesize_rules() -> dict[str, Any]:

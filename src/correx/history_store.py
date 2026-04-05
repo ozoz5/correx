@@ -90,7 +90,10 @@ class HistoryStore:
         self.ghost_trajectories_file = self.base_dir / "ghost_trajectories.json"
         self.curiosity_signals_file = self.base_dir / "curiosity_signals.json"
         self.tensions_file = self.base_dir / "tensions.json"
+        self.narrative_file = self.base_dir / "narrative.json"
         self.knowledge_gap_clusters_file = self.base_dir / "knowledge_gap_clusters.json"
+        self.ghost_universal_laws_file = self.base_dir / "ghost_universal_laws.json"
+        self.ghost_positive_laws_file = self.base_dir / "ghost_positive_laws.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -792,6 +795,21 @@ class HistoryStore:
         finally:
             self._unlock_handle(handle)
 
+    def load_narrative(self) -> dict:
+        handle = self._lock_handle()
+        try:
+            data = self._read_json_list(self.narrative_file)
+            return data[0] if data else {}
+        finally:
+            self._unlock_handle(handle)
+
+    def write_narrative(self, state_dict: dict) -> None:
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.narrative_file, [state_dict])
+        finally:
+            self._unlock_handle(handle)
+
     def load_deferred_meanings(self) -> list[Meaning]:
         handle = self._lock_handle()
         try:
@@ -817,6 +835,62 @@ class HistoryStore:
         handle = self._lock_handle()
         try:
             self._write_preference_rules_unlocked(rules)
+        finally:
+            self._unlock_handle(handle)
+
+    # ------------------------------------------------------------------
+    # Ghost Laws persistence
+    # ------------------------------------------------------------------
+
+    def load_ghost_universal_laws(self) -> list[dict]:
+        """Load ghost universal (禁止) laws as raw dicts, with lock."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.ghost_universal_laws_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_ghost_universal_laws(self, laws: list[dict]) -> None:
+        """Atomically write ghost universal laws, with lock."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.ghost_universal_laws_file, laws)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_ghost_positive_laws(self) -> list[dict]:
+        """Load ghost positive (推奨) laws as raw dicts, with lock."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.ghost_positive_laws_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_ghost_positive_laws(self, laws: list[dict]) -> None:
+        """Atomically write ghost positive laws, with lock."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.ghost_positive_laws_file, laws)
+        finally:
+            self._unlock_handle(handle)
+
+    # ------------------------------------------------------------------
+    # Raw dict locked read/write (for service.py interop)
+    # ------------------------------------------------------------------
+
+    def load_preference_rules_raw(self) -> list[dict]:
+        """Load preference rules as raw dicts (no dataclass conversion), with lock."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.preference_rules_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_preference_rules_raw(self, rules: list[dict]) -> None:
+        """Atomically write preference rules from raw dicts, with lock."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.preference_rules_file, rules)
         finally:
             self._unlock_handle(handle)
 
