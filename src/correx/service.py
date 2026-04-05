@@ -589,16 +589,19 @@ class CorrexService:
     def build_compact_guidance(self, *, task_scope: str = "", budget: int = 4000) -> str:
         """Build a compact guidance string for SessionStart hook injection.
 
-        Prioritised layers (never exceeds *budget* chars):
-        1. Policies (core + why only)
-        2. Laws (禁止 + 推奨, 1-line each)
-        3. Top 3 preference rules (statement only)
-        4. Personality 1-liner
-        5. Cognitive alerts (if escalated)
-        Lower-priority layers are dropped when budget is exhausted.
-        """
-        import json as _json
+        Research-backed design (2025-2026 findings):
+        - Social authority framing: compliance 14% → 77.8%
+        - Before/after examples > abstract rules (few-shot learning)
+        - Max 15 items total (150-rule ceiling, ~50 consumed by system prompt)
+        - Critical rules at beginning AND end (Lost in the Middle effect)
 
+        Layers:
+        1. Policies with authority framing (core + evidence count)
+        2. Before/After examples from Ghost rejected/accepted pairs
+        3. Top 5 preference rules
+        4. Personality 1-liner
+        5. Repeat: top 3 policy titles (end-of-prompt anchoring)
+        """
         sections: list[str] = []
         remaining = budget
 
@@ -609,58 +612,53 @@ class CorrexService:
             if not required and len(text) > remaining:
                 return False
             sections.append(text)
-            remaining -= len(text) + 2  # +2 for "\n\n" joiner
+            remaining -= len(text) + 2
             return True
 
-        # --- P1: Policies (never dropped) ---
+        # --- P1: Policies with social authority framing ---
         policies = self.history.load_policies()
         active_policies = [p for p in policies if p.maturity == "active"]
         if active_policies:
-            lines = ["[ポリシー]"]
+            lines = ["[ポリシー — ユーザーの修正データから蒸留された行動原則]"]
             for p in active_policies:
-                why_part = f" なぜ: {p.why[:120]}" if p.why else ""
-                lines.append(f"### {p.title}\n核: {p.core}{why_part}")
+                ev = getattr(p, "evidence_count", 0) or 0
+                authority = f"（{ev}件の修正データから確立）" if ev >= 5 else ""
+                lines.append(f"- {p.title}{authority}: {p.core}")
             _append("\n".join(lines), required=True)
 
-        # --- P2: Laws (禁止 + 推奨 + 固有原則) ---
-        law_lines: list[str] = []
-        universal_laws = self.history.load_ghost_universal_laws()
-        if universal_laws:
-            law_lines.append("[禁止法理]")
-            for i, law in enumerate(universal_laws, 1):
-                t = law.get("law", "") if isinstance(law, dict) else str(law)
-                if t:
-                    law_lines.append(f"  {i}. {t}")
+        # --- P2: Before/After examples from Ghosts ---
+        try:
+            ghosts = self.history.load_ghosts()
+            examples = []
+            for g in ghosts:
+                rejected = g.get("rejected_output", "")
+                accepted = g.get("accepted_output", "")
+                feedback = g.get("user_feedback", "")
+                pe = g.get("prediction_error", 0)
+                if rejected and (accepted or feedback) and len(rejected) > 20:
+                    examples.append((pe, rejected, accepted, feedback))
+            examples.sort(key=lambda x: x[0], reverse=True)
 
-        positive_laws = self.history.load_ghost_positive_laws()
-        if positive_laws:
-            law_lines.append("[推奨法理]")
-            for i, law in enumerate(positive_laws, 1):
-                t = law.get("law", "") if isinstance(law, dict) else str(law)
-                if t:
-                    law_lines.append(f"  +{i}. {t}")
+            if examples:
+                ba_lines = ["[実例 — 過去に却下/修正された行動パターン]"]
+                for pe, rejected, accepted, feedback in examples[:3]:
+                    rej_short = rejected[:100].replace("\n", " ")
+                    ba_lines.append(f"✗ {rej_short}")
+                    if accepted:
+                        acc_short = accepted[:100].replace("\n", " ")
+                        ba_lines.append(f"✓ {acc_short}")
+                    elif feedback:
+                        fb_short = feedback[:100].replace("\n", " ")
+                        ba_lines.append(f"→ ユーザー: {fb_short}")
+                _append("\n".join(ba_lines))
+        except Exception:
+            pass
 
-        # Tension resolution rule (compact)
-        if law_lines:
-            law_lines.append("[適用] 開始時・未知=禁止重視 / 確定後・既知=推奨重視。両方意識しろ。")
-
-        # Fixed principles
-        principles = self.get_fired_ghost_principles()
-        if principles:
-            cleaned = _deduplicate_ghost_principles(principles, similarity_threshold=0.5, cap=5)
-            if cleaned:
-                law_lines.append("[固有原則]")
-                for i, p in enumerate(cleaned, 1):
-                    law_lines.append(f"  {i}. {p}")
-
-        if law_lines:
-            _append("\n".join(law_lines))
-
-        # --- P3: Top 3 rules (statement only) ---
+        # --- P3: Top 5 preference rules ---
         rules = self.history.load_preference_rules()
         promoted = [r for r in rules if r.status == "promoted"]
         promoted.sort(key=lambda r: r.expected_gain * r.confidence_score, reverse=True)
-        top_rules = promoted[:3]
+        top_rules = promoted[:5]
         if top_rules:
             r_lines = ["[ルール]"]
             for r in top_rules:
@@ -683,19 +681,12 @@ class CorrexService:
         except Exception:
             pass
 
-        # --- P5: Cognitive alerts ---
-        try:
-            cluster_dicts = self.history.load_knowledge_gap_clusters()
-            escalated = [
-                c for c in cluster_dicts
-                if c.get("status") == "escalated"
-                or (c.get("escalation_score", 0) >= 0.5 and c.get("status") != "resolved")
-            ]
-            if escalated:
-                scopes = list({c.get("scope", "general") for c in escalated})[:3]
-                _append(f"[注意] エスカレーション: {', '.join(scopes)} — 基礎から説明せよ")
-        except Exception:
-            pass
+        # --- P5: End-of-prompt anchoring (repeat top 3 policies) ---
+        if active_policies:
+            anchor = "[最重要] " + " / ".join(
+                p.title for p in active_policies[:3]
+            )
+            _append(anchor)
 
         return "\n\n".join(sections)
 
