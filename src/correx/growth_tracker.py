@@ -227,13 +227,12 @@ class GrowthTracker:
         """
         Automatically record growth from accumulated ConversationTurns.
 
-        Groups turns by task_scope, then compares:
-          - turns where guidance_applied=False  →  baseline scores
-          - turns where guidance_applied=True   →  guided scores
+        Two measurement strategies:
+        1. A/B comparison: guided vs unguided turns in the same scope
+        2. Temporal progression: early vs recent turns in the same scope
+           (captures growth even when most turns are unguided)
 
-        Records a new GrowthRecord only when both sides have enough data
-        AND the average scores have changed since the last recorded delta.
-
+        Records a new GrowthRecord only when scores have changed since last record.
         Returns the list of newly recorded GrowthRecords.
         """
         from collections import defaultdict
@@ -247,6 +246,7 @@ class GrowthTracker:
         new_records: list[GrowthRecord] = []
 
         for scope, scope_turns in by_scope.items():
+            # --- Strategy 1: A/B (guided vs unguided) ---
             baseline_turns = [
                 t for t in scope_turns
                 if not getattr(t, "guidance_applied", False)
@@ -258,40 +258,76 @@ class GrowthTracker:
                 and getattr(t, "reaction_score", None) is not None
             ]
 
-            if len(baseline_turns) < min_turns_per_side:
-                continue
-            if len(guided_turns) < min_turns_per_side:
-                continue
+            if len(baseline_turns) >= min_turns_per_side and len(guided_turns) >= min_turns_per_side:
+                baseline_avg = sum(t.reaction_score for t in baseline_turns) / len(baseline_turns)
+                guided_avg = sum(t.reaction_score for t in guided_turns) / len(guided_turns)
 
-            baseline_avg = sum(t.reaction_score for t in baseline_turns) / len(baseline_turns)
-            guided_avg = sum(t.reaction_score for t in guided_turns) / len(guided_turns)
+                existing = self.load_history(case_id=f"auto-{scope}")
+                should_record = True
+                if existing:
+                    last = sorted(existing, key=lambda r: r.recorded_at)[-1]
+                    if (
+                        abs(last.baseline_score - baseline_avg) < 0.01
+                        and abs(last.guided_score - guided_avg) < 0.01
+                    ):
+                        should_record = False
 
-            # Skip if already recorded this exact delta for this scope
-            existing = self.load_history(case_id=f"auto-{scope}")
-            if existing:
-                last = sorted(existing, key=lambda r: r.recorded_at)[-1]
-                if (
-                    abs(last.baseline_score - baseline_avg) < 0.01
-                    and abs(last.guided_score - guided_avg) < 0.01
-                ):
-                    continue  # nothing new to record
+                if should_record:
+                    baseline_output = getattr(baseline_turns[-1], "assistant_message", "") or ""
+                    guided_output = getattr(guided_turns[-1], "assistant_message", "") or ""
+                    guidance_text = getattr(guided_turns[-1], "user_message", "") or ""
 
-            # Pick representative outputs for traceability
-            baseline_output = getattr(baseline_turns[-1], "assistant_message", "") or ""
-            guided_output = getattr(guided_turns[-1], "assistant_message", "") or ""
-            guidance_text = getattr(guided_turns[-1], "user_message", "") or ""
+                    record = self.record(
+                        case_id=f"auto-{scope}",
+                        case_title=f"{scope} (auto)",
+                        task_scope=scope,
+                        baseline_output=baseline_output,
+                        baseline_score=round(baseline_avg, 4),
+                        guided_output=guided_output,
+                        guided_score=round(guided_avg, 4),
+                        guidance_text=guidance_text,
+                    )
+                    new_records.append(record)
 
-            record = self.record(
-                case_id=f"auto-{scope}",
-                case_title=f"{scope} (auto)",
-                task_scope=scope,
-                baseline_output=baseline_output,
-                baseline_score=round(baseline_avg, 4),
-                guided_output=guided_output,
-                guided_score=round(guided_avg, 4),
-                guidance_text=guidance_text,
-            )
-            new_records.append(record)
+            # --- Strategy 2: Temporal progression (early vs recent) ---
+            scored_turns = [
+                t for t in scope_turns
+                if getattr(t, "reaction_score", None) is not None
+            ]
+            # Need at least 10 turns for meaningful temporal split
+            if len(scored_turns) >= 10:
+                # Sort by recorded_at
+                scored_turns.sort(key=lambda t: getattr(t, "recorded_at", ""))
+                midpoint = len(scored_turns) // 2
+                early_turns = scored_turns[:midpoint]
+                recent_turns = scored_turns[midpoint:]
+
+                early_avg = sum(t.reaction_score for t in early_turns) / len(early_turns)
+                recent_avg = sum(t.reaction_score for t in recent_turns) / len(recent_turns)
+
+                case_id = f"temporal-{scope}"
+                existing = self.load_history(case_id=case_id)
+                should_record = True
+                if existing:
+                    last = sorted(existing, key=lambda r: r.recorded_at)[-1]
+                    if (
+                        abs(last.baseline_score - early_avg) < 0.01
+                        and abs(last.guided_score - recent_avg) < 0.01
+                    ):
+                        should_record = False
+
+                if should_record:
+                    record = self.record(
+                        case_id=case_id,
+                        case_title=f"{scope} (temporal: early→recent)",
+                        task_scope=scope,
+                        baseline_output=f"early {len(early_turns)} turns avg",
+                        baseline_score=round(early_avg, 4),
+                        guided_output=f"recent {len(recent_turns)} turns avg",
+                        guided_score=round(recent_avg, 4),
+                        guidance_text="",
+                    )
+                    new_records.append(record)
 
         return new_records
 

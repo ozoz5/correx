@@ -94,6 +94,7 @@ class HistoryStore:
         self.knowledge_gap_clusters_file = self.base_dir / "knowledge_gap_clusters.json"
         self.ghost_universal_laws_file = self.base_dir / "ghost_universal_laws.json"
         self.ghost_positive_laws_file = self.base_dir / "ghost_positive_laws.json"
+        self.ghost_abstracted_principles_file = self.base_dir / "ghost_abstracted_principles.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -855,6 +856,22 @@ class HistoryStore:
         handle = self._lock_handle()
         try:
             self._atomic_write_json(self.ghost_universal_laws_file, laws)
+        finally:
+            self._unlock_handle(handle)
+
+    def load_ghost_abstracted_principles(self) -> list[dict]:
+        """Load ghost abstracted principles as raw dicts, with lock."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.ghost_abstracted_principles_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def save_ghost_abstracted_principles(self, principles: list[dict]) -> None:
+        """Atomically write ghost abstracted principles, with lock."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.ghost_abstracted_principles_file, principles)
         finally:
             self._unlock_handle(handle)
 

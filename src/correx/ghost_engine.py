@@ -102,16 +102,23 @@ def origin_weight(origin: str) -> float:
 # Prediction error — text-based divergence (no embeddings required)
 # ---------------------------------------------------------------------------
 
+from .text_similarity import char_ngrams as _ts_char_ngrams  # noqa: E402
+from .text_similarity import ngram_jaccard  # noqa: E402
+
+
 def _char_ngrams(text: str, n: int = 3) -> set[str]:
-    t = re.sub(r"\s+", " ", text.lower()).strip()
-    return {t[i : i + n] for i in range(len(t) - n + 1)} if len(t) >= n else set()
+    # Ghost engine preserves word boundaries (original behavior)
+    return _ts_char_ngrams(text, n, normalize_spaces=True)
 
 
 def _ngram_similarity(a: str, b: str, n: int = 3) -> float:
-    na, nb = _char_ngrams(a, n), _char_ngrams(b, n)
-    if not na or not nb:
+    if not a or not b:
         return 0.0
-    return len(na & nb) / len(na | nb)
+    sa = _char_ngrams(a, n)
+    sb = _char_ngrams(b, n)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
 
 
 def _length_divergence(predicted: str, actual: str) -> float:
@@ -653,6 +660,46 @@ def _sanitize_principle(text: str) -> str:
     return text.strip()
 
 
+# Task-specific terms that indicate a principle is not generalizable
+_TASK_SPECIFIC_PATTERNS = re.compile(
+    r"ロゴ|ヘッダー|フッター|サムネイル|アップロード|ナレーション|BGM|LP|"
+    r"CSV|Excel|PowerPoint|PS1|VM|Parallels|HuggingFace|Streamlit|"
+    r"動画|カット\d|スライド|絵コンテ|フォルダ|シート|"
+    r"オッズ|発走|成績|マイニング|検診|キット|グルーヴ|合いの手|"
+    r"API[キコ]|デプロイ|GitHub|wanは",
+    re.IGNORECASE,
+)
+
+# Broken/meta principles that are clearly not behavioral rules
+_BROKEN_PRINCIPLE_PATTERNS = re.compile(
+    r"固有原則|汎用化します|を汎用化すると|解説[:：]|この原則は",
+    re.IGNORECASE,
+)
+
+
+def is_principle_generalizable(principle: str) -> bool:
+    """Check if a principle is generalizable (not task-specific).
+
+    Returns True if the principle is likely useful across contexts.
+    Returns False if it references specific tools, UI elements, or project terms.
+
+    Strategy: reject known-bad patterns rather than requiring known-good patterns.
+    Japanese verb conjugation is too complex for positive matching.
+    """
+    if not principle or len(principle) < 8:
+        return False
+
+    # Contains task-specific terms → not generalizable
+    if _TASK_SPECIFIC_PATTERNS.search(principle):
+        return False
+
+    # Broken/meta text that isn't a real principle
+    if _BROKEN_PRINCIPLE_PATTERNS.search(principle):
+        return False
+
+    return True
+
+
 def _is_duplicate_principle(
     new_principle: str,
     existing_principles: list[str],
@@ -678,10 +725,7 @@ def _is_duplicate_principle(
 
 def _principle_ngrams(text: str, n: int = 3) -> set[str]:
     """Character n-grams for principle similarity comparison."""
-    text = re.sub(r"\s+", "", text.lower())
-    if len(text) < n:
-        return set()
-    return {text[i:i+n] for i in range(len(text) - n + 1)}
+    return _char_ngrams(text, n)
 
 
 def process_ghost(
@@ -726,7 +770,11 @@ def process_ghost(
         # 4a. Sanitize markdown noise
         principle = _sanitize_principle(principle)
 
-        # 4b. Dedup against existing principles
+        # 4b. Quality gate — reject task-specific principles
+        if principle and not is_principle_generalizable(principle):
+            principle = ""  # suppress non-generalizable
+
+        # 4c. Dedup against existing principles
         all_existing = existing_principles or []
         if principle and _is_duplicate_principle(principle, all_existing):
             principle = ""  # suppress duplicate

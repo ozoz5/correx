@@ -1671,6 +1671,18 @@ def create_mcp_server(
         }
 
     @mcp.tool()
+    def cleanup_ghost_principles() -> dict[str, Any]:
+        """Clean up ghost principles: remove task-specific noise, merge duplicates, fix law duplicates.
+
+        Run this when ghost principles have accumulated too many task-specific
+        or duplicate entries. Removes non-generalizable principles and merges
+        duplicate universal laws.
+
+        Returns cleanup statistics.
+        """
+        return service.cleanup_ghost_principles()
+
+    @mcp.tool()
     def get_pending_sublimations() -> dict[str, Any]:
         """Get ghost trajectories that need client-side LLM sublimation.
 

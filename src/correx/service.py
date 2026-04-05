@@ -981,27 +981,83 @@ class CorrexService:
             return [t for t in tensions if t.status == "active"]
         return tensions
 
+    @staticmethod
+    def _classify_action_direction(text: str) -> set[str]:
+        """Classify a rule's action direction(s) for tension detection.
+
+        Returns a set of direction tags. Rules can have multiple directions.
+        Opposite direction pairs are tension candidates.
+
+        Direction pairs (opposites):
+          confirm ↔ execute  (確認を取れ vs 即実行せよ)
+          preserve ↔ change  (壊すな vs 改善しろ)
+          wait ↔ act         (待て vs 走れ)
+          part ↔ whole       (部分で進め vs 全体を見ろ)
+        """
+        import re
+        directions: set[str] = set()
+
+        # confirm: 確認系
+        if re.search(r"確認|聞[けい]|方針.*取[れる]|承認|ユーザーに.*求め|仰[ぐげ]", text):
+            directions.add("confirm")
+
+        # execute: 即実行系
+        if re.search(r"即[座実]|即.*[せしや]|結果を出|走[れる]|完遂|一気に|即座", text):
+            directions.add("execute")
+
+        # preserve: 保全系
+        if re.search(r"壊すな|変更するな|守[れる]|既存.*[を壊変]|維持|退行させるな|上書きするな", text):
+            directions.add("preserve")
+
+        # change: 変更系
+        if re.search(r"改善|段階的|動くもの|磨き|リファクタ", text):
+            directions.add("change")
+
+        # wait: 待機系
+        if re.search(r"待[てつ]|先[にに]|してから|完了.*から|前に", text):
+            directions.add("wait")
+
+        # act: 行動系
+        if re.search(r"宣言するな|やれ$|動け$|出せ$|止めるな|走らせろ|止まるな", text):
+            directions.add("act")
+
+        # part: 部分系
+        if re.search(r"段階|一つ.*完了|単体|指定された範囲", text):
+            directions.add("part")
+
+        # whole: 全体系
+        if re.search(r"全体.*[を見再]|全指摘|部分.*するな|全件", text):
+            directions.add("whole")
+
+        return directions
+
+    # Direction pairs that indicate potential tension
+    _OPPOSITE_DIRECTIONS = [
+        ("confirm", "execute"),
+        ("preserve", "change"),
+        ("wait", "act"),
+        ("part", "whole"),
+    ]
+
     def detect_tension_candidates(self) -> list[dict]:
-        """Server-side lightweight candidate generation for contradiction detection.
+        """Server-side candidate generation for contradiction detection.
 
-        Generates candidate pairs for the client LLM to judge.  Server does
-        cheap filtering (keyword overlap + scope match); LLM does the real
-        contradiction judgment using full context understanding.
+        Two detection strategies:
+        1. Keyword overlap (original) — finds rules about the same topic
+        2. Action direction opposition — finds rules pointing in opposite directions
 
-        No LLM needed on server — inverted architecture (same as Ghost sublimation).
+        The client LLM judges which candidates are genuine contradictions.
         """
         import re
 
         # --- Collect statements with scope metadata ---
         rules = self.history.load_preference_rules()
-        # Include all rules (not just promoted) — LLM needs broader context
         statements: list[tuple[str, str, str]] = []  # (id, text, scope)
         for r in rules:
             text = r.statement or r.instruction
             if text:
                 statements.append((r.id, text, getattr(r, "applies_to_scope", "") or ""))
 
-        # Also include ghost principles (no scope info)
         ghost_principles = self.get_fired_ghost_principles()
         for i, gp in enumerate(ghost_principles):
             statements.append((f"ghost-{i}", gp, ""))
@@ -1013,14 +1069,11 @@ class CorrexService:
             r'(?<=.)[をにはがでとのもへ](?=.)'
         )
 
-        # Verb endings and generic words to exclude from overlap matching
         _STOP_WORDS = {
-            # Verb endings (命令形/禁止形 — match almost all rules)
             "しろ", "せよ", "やれ", "するな", "やるな", "出せ", "直せ",
             "動け", "避けよ", "控え", "走るな", "行け", "超えるな",
             "変えるな", "復唱するな", "実行しろ", "確認しろ", "記録しろ",
             "提案するな", "安心するな", "忘れるな",
-            # Generic nouns (appear in many rules, low discriminative power)
             "ユーザー", "タスク", "作業", "実行", "確認", "提案",
             "コード", "修正", "バグ", "テスト", "セッション",
             "ファイル", "データ", "結果", "報告", "指示",
@@ -1042,6 +1095,11 @@ class CorrexService:
                             result.add(sub)
             return result - _STOP_WORDS
 
+        # --- Pre-compute directions for all statements ---
+        directions_cache: dict[int, set[str]] = {}
+        for idx, (_, text, _) in enumerate(statements):
+            directions_cache[idx] = self._classify_action_direction(text)
+
         # --- Find candidate pairs ---
         candidates: list[dict] = []
         existing = self.history.load_tensions()
@@ -1050,8 +1108,8 @@ class CorrexService:
 
         for i, (id_a, text_a, scope_a) in enumerate(statements):
             kw_a = extract_keywords(text_a)
-            if not kw_a:
-                continue
+            dirs_a = directions_cache[i]
+
             for j, (id_b, text_b, scope_b) in enumerate(statements):
                 if j <= i:
                     continue
@@ -1059,24 +1117,38 @@ class CorrexService:
                     continue
 
                 kw_b = extract_keywords(text_b)
-                if not kw_b:
-                    continue
+                dirs_b = directions_cache[j]
 
-                overlap = kw_a & kw_b
-
-                # Scoring: scope match is a strong signal, keyword overlap adds weight
+                overlap = kw_a & kw_b if kw_a and kw_b else set()
                 scope_match = bool(scope_a and scope_b and scope_a == scope_b)
                 overlap_count = len(overlap)
 
-                # Require: 2+ meaningful keyword overlap, OR scope match + 1+ overlap
+                # Strategy 1: Keyword overlap (original)
+                keyword_score = 0
                 if scope_match and overlap_count >= 1:
-                    score = overlap_count + 5  # scope match bonus
+                    keyword_score = overlap_count + 5
                 elif overlap_count >= 2:
-                    score = overlap_count
-                else:
+                    keyword_score = overlap_count
+
+                # Strategy 2: Action direction opposition
+                direction_score = 0
+                opposing_dirs: list[tuple[str, str]] = []
+                if dirs_a and dirs_b:
+                    for dir_a, dir_b in self._OPPOSITE_DIRECTIONS:
+                        if (dir_a in dirs_a and dir_b in dirs_b) or \
+                           (dir_b in dirs_a and dir_a in dirs_b):
+                            direction_score += 8
+                            opposing_dirs.append((dir_a, dir_b))
+
+                # Combined score
+                score = max(keyword_score, direction_score)
+                if keyword_score > 0 and direction_score > 0:
+                    score = keyword_score + direction_score  # both signals = strong
+
+                if score < 2:
                     continue
 
-                candidates.append({
+                candidate = {
                     "rule_a_id": id_a,
                     "rule_a_text": text_a,
                     "rule_b_id": id_b,
@@ -1084,12 +1156,16 @@ class CorrexService:
                     "shared_keywords": sorted(overlap),
                     "scope_match": scope_match,
                     "_score": score,
-                })
+                }
+                if opposing_dirs:
+                    candidate["opposing_directions"] = [
+                        f"{a} ↔ {b}" for a, b in opposing_dirs
+                    ]
+                candidates.append(candidate)
 
         # Sort by score descending, cap at 50
         candidates.sort(key=lambda c: c["_score"], reverse=True)
         candidates = candidates[:50]
-        # Remove internal score field
         for c in candidates:
             del c["_score"]
 
@@ -2096,3 +2172,144 @@ class CorrexService:
                 deduped_bigrams.append(bg)
 
         return deduped
+
+    def cleanup_ghost_principles(self) -> dict:
+        """Clean up ghost principles: remove task-specific, merge duplicates, fix laws.
+
+        Returns stats about what was cleaned.
+        """
+        from .ghost_engine import is_principle_generalizable
+        from .text_similarity import char_ngrams as _ts_ngrams
+
+        stats = {
+            "principles_before": 0,
+            "principles_after": 0,
+            "principles_removed": 0,
+            "laws_before": 0,
+            "laws_after": 0,
+            "laws_merged": 0,
+        }
+
+        # --- Phase 1: Clean abstracted principles ---
+        principles = self.history.load_ghost_abstracted_principles()
+        stats["principles_before"] = len(principles)
+
+        cleaned_principles = []
+        for p in principles:
+            specific = p.get("specific", "")
+            universal = p.get("universal", "")
+
+            # Keep if the universal version is generalizable
+            if universal and is_principle_generalizable(universal):
+                cleaned_principles.append(p)
+            # Or if specific is generalizable (and no universal)
+            elif not universal and specific and is_principle_generalizable(specific):
+                cleaned_principles.append(p)
+
+        # Deduplicate by universal text (bigram Jaccard > 0.5)
+        final_principles = []
+        seen_bigrams: list[set[str]] = []
+        for p in cleaned_principles:
+            text = p.get("universal", "") or p.get("specific", "")
+            bg = _ts_ngrams(text, 2, particles=True)
+            if not bg:
+                final_principles.append(p)
+                seen_bigrams.append(bg)
+                continue
+            is_dup = False
+            for existing_bg in seen_bigrams:
+                if not existing_bg:
+                    continue
+                jaccard = len(bg & existing_bg) / len(bg | existing_bg)
+                if jaccard > 0.50:
+                    is_dup = True
+                    break
+            if not is_dup:
+                final_principles.append(p)
+                seen_bigrams.append(bg)
+
+        stats["principles_after"] = len(final_principles)
+        stats["principles_removed"] = stats["principles_before"] - stats["principles_after"]
+        self.history.save_ghost_abstracted_principles(final_principles)
+
+        # --- Phase 2: Deduplicate universal laws ---
+        laws_data = self.history.load_ghost_universal_laws()
+        laws = laws_data.get("items", []) if isinstance(laws_data, dict) else laws_data
+        stats["laws_before"] = len(laws)
+
+        # Merge exact duplicate law texts
+        merged_laws: list[dict] = []
+        law_text_map: dict[str, int] = {}
+        for law in laws:
+            text = law.get("law", "").strip()
+            if text in law_text_map:
+                idx = law_text_map[text]
+                existing_covers = merged_laws[idx].get("covers", [])
+                new_covers = law.get("covers", [])
+                existing_ids = set()
+                for c in existing_covers:
+                    if isinstance(c, int):
+                        existing_ids.add(c)
+                    elif isinstance(c, dict):
+                        existing_ids.add(c.get("trajectory_id", ""))
+                for c in new_covers:
+                    cid = c if isinstance(c, int) else c.get("trajectory_id", "")
+                    if cid not in existing_ids:
+                        existing_covers.append(c)
+                        existing_ids.add(cid)
+                merged_laws[idx]["covers"] = existing_covers
+                stats["laws_merged"] += 1
+            else:
+                law_text_map[text] = len(merged_laws)
+                merged_laws.append(law)
+
+        # Also merge laws with high bigram similarity (> 0.7)
+        further_merged: list[dict] = []
+        fm_bigrams: list[set[str]] = []
+        for law in merged_laws:
+            text = law.get("law", "")
+            bg = _ts_ngrams(text, 2, particles=True)
+            merged_into = None
+            if bg:
+                for i, existing_bg in enumerate(fm_bigrams):
+                    if not existing_bg:
+                        continue
+                    jaccard = len(bg & existing_bg) / len(bg | existing_bg)
+                    if jaccard > 0.70:
+                        merged_into = i
+                        break
+            if merged_into is not None:
+                existing = further_merged[merged_into]
+                if len(law.get("law", "")) > len(existing.get("law", "")):
+                    existing["law"] = law["law"]
+                existing_covers = existing.get("covers", [])
+                existing_covers.extend(law.get("covers", []))
+                existing["covers"] = existing_covers
+                stats["laws_merged"] += 1
+            else:
+                further_merged.append(law)
+                fm_bigrams.append(bg)
+
+        stats["laws_after"] = len(further_merged)
+
+        if isinstance(laws_data, dict):
+            laws_data["items"] = further_merged
+            self.history.write_ghost_universal_laws(laws_data)
+        else:
+            self.history.write_ghost_universal_laws(further_merged)
+
+        # --- Phase 3: Clean trajectory sublimated_principles ---
+        # This is what get_fired_ghost_principles actually reads
+        trajectories = self.history.load_ghost_trajectories()
+        traj_cleaned = 0
+        for t in trajectories:
+            if t.get("fired") and t.get("sublimated_principle"):
+                principle = t["sublimated_principle"]
+                if not is_principle_generalizable(principle):
+                    t["sublimated_principle"] = ""
+                    traj_cleaned += 1
+        if traj_cleaned > 0:
+            self.history.write_ghost_trajectories(trajectories)
+        stats["trajectories_cleaned"] = traj_cleaned
+
+        return stats
