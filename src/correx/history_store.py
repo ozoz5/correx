@@ -68,6 +68,7 @@ from .schemas import (
     PreferenceRule,
     Principle,
     RuleContext,
+    Tension,
     TrainingExample,
 )
 
@@ -88,6 +89,7 @@ class HistoryStore:
         self.ghosts_file = self.base_dir / "ghosts.json"
         self.ghost_trajectories_file = self.base_dir / "ghost_trajectories.json"
         self.curiosity_signals_file = self.base_dir / "curiosity_signals.json"
+        self.tensions_file = self.base_dir / "tensions.json"
         self.knowledge_gap_clusters_file = self.base_dir / "knowledge_gap_clusters.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
@@ -309,6 +311,49 @@ class HistoryStore:
             updated_at=str(item.get("updated_at", "")),
             approved_by=str(item.get("approved_by", "")),
         )
+
+    # ── Tension (contradiction montage) ─────────────────────────
+
+    def _load_tensions_unlocked(self) -> list[Tension]:
+        return [self._normalize_tension(item) for item in self._read_json_list(self.tensions_file)]
+
+    def _write_tensions_unlocked(self, tensions: list[Tension]) -> None:
+        self._atomic_write_json(self.tensions_file, [asdict(t) for t in tensions])
+
+    @staticmethod
+    def _normalize_tension(item: dict) -> Tension:
+        return Tension(
+            id=str(item.get("id", "")),
+            rule_a_id=str(item.get("rule_a_id", "")),
+            rule_a_text=str(item.get("rule_a_text", "")),
+            rule_b_id=str(item.get("rule_b_id", "")),
+            rule_b_text=str(item.get("rule_b_text", "")),
+            boundary=str(item.get("boundary", "")),
+            signal=str(item.get("signal", "")),
+            evidence_a=list(item.get("evidence_a", [])),
+            evidence_b=list(item.get("evidence_b", [])),
+            scopes=list(item.get("scopes", [])),
+            confidence=float(item.get("confidence", 0.0)),
+            created_at=str(item.get("created_at", "")),
+            updated_at=str(item.get("updated_at", "")),
+            status=str(item.get("status", "active")),
+        )
+
+    def load_tensions(self) -> list[Tension]:
+        handle = self._lock_handle()
+        try:
+            return self._load_tensions_unlocked()
+        finally:
+            self._unlock_handle(handle)
+
+    def write_tensions(self, tensions: list[Tension]) -> None:
+        handle = self._lock_handle()
+        try:
+            self._write_tensions_unlocked(tensions)
+        finally:
+            self._unlock_handle(handle)
+
+    # ── EpisodeRecord ─────────────────────────────────────────
 
     def _normalize_entry(self, item: dict) -> EpisodeRecord:
         corrections = [

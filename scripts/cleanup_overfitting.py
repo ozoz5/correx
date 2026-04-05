@@ -13,7 +13,7 @@ import re
 import shutil
 from pathlib import Path
 
-BASE_DIR = Path.home() / ".pseudo-intelligence"
+BASE_DIR = Path.home() / ".correx"
 
 
 # ── Sanitize ──────────────────────────────────────────────────────────

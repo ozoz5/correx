@@ -176,6 +176,34 @@ class Principle:
 
 
 @dataclass(slots=True)
+class Tension:
+    """A contradiction pair between two rules/principles.
+
+    When two rules point in opposite directions, neither is wrong —
+    the contradiction reveals the BOUNDARY CONDITION: when to apply A
+    vs B.  Extracting this boundary is the closest thing to learning
+    human *judgment* rather than human *rules*.
+
+    Detection is server-side (keyword overlap + directive opposition).
+    Boundary extraction is client-LLM-side (inverted architecture).
+    """
+    id: str
+    rule_a_id: str                          # source rule/principle ID
+    rule_a_text: str                        # human-readable statement
+    rule_b_id: str
+    rule_b_text: str
+    boundary: str = ""                      # "when A, when B" — the decision function
+    signal: str = ""                        # what observable cue triggers the switch
+    evidence_a: list[str] = field(default_factory=list)  # turn IDs where A was correct
+    evidence_b: list[str] = field(default_factory=list)  # turn IDs where B was correct
+    scopes: list[str] = field(default_factory=list)
+    confidence: float = 0.0
+    created_at: str = ""
+    updated_at: str = ""
+    status: str = "active"                  # active / resolved / superseded
+
+
+@dataclass(slots=True)
 class Ghost:
     """A rejected AI proposal that persists as a counterfactual memory.
 

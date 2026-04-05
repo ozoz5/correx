@@ -359,14 +359,20 @@ class CorrexServiceTest(unittest.TestCase):
                 user_feedback="余白を作れ。",
             )
 
-            summary = _memory_summary(service)
+            # Compact mode (default) — short keys, no lists
+            compact = _memory_summary(service)
+            self.assertEqual(1, compact["entries"])
+            self.assertEqual(1, compact["turns"])
+            self.assertNotIn("latest_entries", compact)
 
-            self.assertEqual(1, summary["entry_count"])
-            self.assertEqual(1, summary["conversation_turn_count"])
-            self.assertEqual(1, summary["accepted_training_example_count"])
-            self.assertEqual("summary-demo", summary["latest_entries"][0]["title"])
-            self.assertIn("high_value_rule_count", summary)
-            self.assertIn("context_transition_count", summary)
+            # Full mode — used by memory://summary resource
+            full = _memory_summary(service, compact=False)
+            self.assertEqual(1, full["entries"])
+            self.assertEqual(1, full["turns"])
+            self.assertEqual(1, full["accepted_training_example_count"])
+            self.assertEqual("summary-demo", full["latest_entries"][0]["title"])
+            self.assertIn("high_value_rule_count", full)
+            self.assertIn("transitions", full)
 
     def test_authoritative_tags_override_auto_extracted_noise(self):
         with TemporaryDirectory() as temp_dir:
@@ -873,6 +879,63 @@ class CorrexServiceTest(unittest.TestCase):
             self.assertEqual(good["success_count"], 3)
             self.assertEqual(bad["status"], "disabled")
             self.assertEqual(bad["failure_count"], 5)
+
+
+    def test_tension_detect_and_save_roundtrip(self):
+        """Tension detection finds opposing directive pairs; save persists them."""
+        with TemporaryDirectory() as temp_dir:
+            svc = CorrexService(Path(temp_dir) / "memory")
+
+            # Create two opposing promoted rules with shared non-generic keyword
+            rules = [
+                {
+                    "id": "pref-confirm-first",
+                    "statement": "クライアントLLMで方針を確認してから動け",
+                    "instruction": "クライアントLLMで方針を確認してから動け",
+                    "status": "promoted",
+                    "evidence_count": 3,
+                },
+                {
+                    "id": "pref-act-immediately",
+                    "statement": "クライアントLLMの復唱するな即座に実行しろ",
+                    "instruction": "クライアントLLMの復唱するな即座に実行しろ",
+                    "status": "promoted",
+                    "evidence_count": 3,
+                },
+            ]
+            svc.history._atomic_write_json(
+                svc.history.preference_rules_file, rules
+            )
+
+            # Detect candidates
+            candidates = svc.detect_tension_candidates()
+            self.assertGreaterEqual(len(candidates), 1)
+            pair = candidates[0]
+            self.assertIn("rule_a_text", pair)
+            self.assertIn("rule_b_text", pair)
+
+            # Save a tension with boundary
+            tension = svc.save_tension(
+                rule_a_id=pair["rule_a_id"],
+                rule_a_text=pair["rule_a_text"],
+                rule_b_id=pair["rule_b_id"],
+                rule_b_text=pair["rule_b_text"],
+                boundary="方針が不明なら確認。明確なら即実行",
+                signal="ユーザーの指示の具体性レベル",
+                confidence=0.85,
+            )
+            self.assertTrue(tension.id.startswith("tension-"))
+            self.assertEqual(tension.boundary, "方針が不明なら確認。明確なら即実行")
+
+            # Verify persistence
+            loaded = svc.list_tensions()
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded[0].boundary, tension.boundary)
+
+            # Verify tension appears in guidance
+            guidance = svc.build_guidance_context(task_title="test")
+            self.assertIn("判断境界", guidance)
+            self.assertIn("方針が不明なら確認", guidance)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ from .personality_layer import (
     detect_interventions,
     format_personality_guidance,
 )
-from .schemas import Meaning, Policy, Principle
+from .schemas import Meaning, Policy, Principle, Tension
 from .curiosity_engine import (
     build_cognitive_map,
     cluster_from_dict,
@@ -595,7 +595,137 @@ class CorrexService:
         if curiosity_section:
             sections.append(curiosity_section)
 
+        # Tension layer: contradiction montage — judgment boundaries
+        tension_section = self._build_tension_guidance()
+        if tension_section:
+            sections.append(tension_section)
+
         return "\n\n".join(section for section in sections if section)
+
+    def build_compact_guidance(self, *, task_scope: str = "", budget: int = 4000) -> str:
+        """Build a compact guidance string for SessionStart hook injection.
+
+        Prioritised layers (never exceeds *budget* chars):
+        1. Policies (core + why only)
+        2. Laws (禁止 + 推奨, 1-line each)
+        3. Top 3 preference rules (statement only)
+        4. Personality 1-liner
+        5. Cognitive alerts (if escalated)
+        Lower-priority layers are dropped when budget is exhausted.
+        """
+        import json as _json
+
+        sections: list[str] = []
+        remaining = budget
+
+        def _append(text: str, *, required: bool = False) -> bool:
+            nonlocal remaining
+            if not text:
+                return False
+            if not required and len(text) > remaining:
+                return False
+            sections.append(text)
+            remaining -= len(text) + 2  # +2 for "\n\n" joiner
+            return True
+
+        # --- P1: Policies (never dropped) ---
+        policies = self.history.load_policies()
+        active_policies = [p for p in policies if p.maturity == "active"]
+        if active_policies:
+            lines = ["[ポリシー]"]
+            for p in active_policies:
+                why_part = f" なぜ: {p.why[:120]}" if p.why else ""
+                lines.append(f"### {p.title}\n核: {p.core}{why_part}")
+            _append("\n".join(lines), required=True)
+
+        # --- P2: Laws (禁止 + 推奨 + 固有原則) ---
+        law_lines: list[str] = []
+        laws_path = self.history.base_dir / "ghost_universal_laws.json"
+        if laws_path.exists():
+            try:
+                raw = _json.loads(laws_path.read_text(encoding="utf-8"))
+                items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
+                if items:
+                    law_lines.append("[禁止法理]")
+                    for i, law in enumerate(items, 1):
+                        t = law.get("law", "") if isinstance(law, dict) else str(law)
+                        if t:
+                            law_lines.append(f"  {i}. {t}")
+            except (ValueError, OSError, KeyError, UnicodeDecodeError):
+                pass
+
+        pos_path = self.history.base_dir / "ghost_positive_laws.json"
+        if pos_path.exists():
+            try:
+                raw = _json.loads(pos_path.read_text(encoding="utf-8"))
+                items = raw["items"] if isinstance(raw, dict) and "items" in raw else raw
+                if items:
+                    law_lines.append("[推奨法理]")
+                    for i, law in enumerate(items, 1):
+                        t = law.get("law", "") if isinstance(law, dict) else str(law)
+                        if t:
+                            law_lines.append(f"  +{i}. {t}")
+            except (ValueError, OSError, KeyError, UnicodeDecodeError):
+                pass
+
+        # Tension resolution rule (compact)
+        if law_lines:
+            law_lines.append("[適用] 開始時・未知=禁止重視 / 確定後・既知=推奨重視。両方意識しろ。")
+
+        # Fixed principles
+        principles = self.get_fired_ghost_principles()
+        if principles:
+            cleaned = _deduplicate_ghost_principles(principles, similarity_threshold=0.5, cap=5)
+            if cleaned:
+                law_lines.append("[固有原則]")
+                for i, p in enumerate(cleaned, 1):
+                    law_lines.append(f"  {i}. {p}")
+
+        if law_lines:
+            _append("\n".join(law_lines))
+
+        # --- P3: Top 3 rules (statement only) ---
+        rules = self.history.load_preference_rules()
+        promoted = [r for r in rules if r.status == "promoted"]
+        promoted.sort(key=lambda r: r.expected_gain * r.confidence_score, reverse=True)
+        top_rules = promoted[:3]
+        if top_rules:
+            r_lines = ["[ルール]"]
+            for r in top_rules:
+                r_lines.append(f"- {r.statement}")
+            _append("\n".join(r_lines))
+
+        # --- P4: Personality 1-liner ---
+        try:
+            profile, interventions = self._compute_personality()
+            if profile.sample_size >= 5:
+                meta = profile.metabolism_rate
+                meta_label = "積極的" if meta > 0.7 else "保守的" if meta < 0.3 else "バランス型"
+                dig = profile.digestibility
+                dig_label = "具体的好み" if dig < 0.3 else "抽象的好み" if dig > 0.7 else "中間"
+                reward_kw = ", ".join(profile.reward_function.get("keywords", [])[:3])
+                line = f"[ユーザー] {meta_label}({meta:.1f}), {dig_label}, 好み: {reward_kw}"
+                if profile.objective_drift.get("detected"):
+                    line += f" | 目標ドリフト検出"
+                _append(line)
+        except Exception:
+            pass
+
+        # --- P5: Cognitive alerts ---
+        try:
+            cluster_dicts = self.history.load_knowledge_gap_clusters()
+            escalated = [
+                c for c in cluster_dicts
+                if c.get("status") == "escalated"
+                or (c.get("escalation_score", 0) >= 0.5 and c.get("status") != "resolved")
+            ]
+            if escalated:
+                scopes = list({c.get("scope", "general") for c in escalated})[:3]
+                _append(f"[注意] エスカレーション: {', '.join(scopes)} — 基礎から説明せよ")
+        except Exception:
+            pass
+
+        return "\n\n".join(sections)
 
     # ------------------------------------------------------------------
     # Personality layer
@@ -891,6 +1021,177 @@ class CorrexService:
         if active_only:
             return [p for p in policies if p.maturity == "active"]
         return policies
+
+    # ------------------------------------------------------------------
+    # Tension — Contradiction Montage
+    # ------------------------------------------------------------------
+
+    def list_tensions(self, *, active_only: bool = False) -> list[Tension]:
+        tensions = self.history.load_tensions()
+        if active_only:
+            return [t for t in tensions if t.status == "active"]
+        return tensions
+
+    def detect_tension_candidates(self) -> list[dict]:
+        """Server-side lightweight contradiction detection.
+
+        Scans promoted rules + ghost principles for pairs that share topic
+        keywords but contain opposing directive words.  Returns candidate
+        pairs for the client LLM to refine and extract boundaries.
+
+        No LLM needed — pure keyword heuristics.
+        """
+        import re
+        from datetime import datetime as _dt
+
+        # Collect all directive statements
+        rules = self.history.load_preference_rules()
+        promoted = [r for r in rules if getattr(r, "status", "") == "promoted"]
+        statements: list[tuple[str, str]] = []  # (id, text)
+        for r in promoted:
+            statements.append((r.id, r.statement or r.instruction))
+
+        # Also include ghost principles
+        ghost_principles = self.get_fired_ghost_principles()
+        for i, gp in enumerate(ghost_principles):
+            statements.append((f"ghost-{i}", gp))
+
+        # Opposing directive markers
+        positive_markers = {"しろ", "せよ", "やれ", "実行", "即", "自発", "動け", "確認", "出せ", "直せ"}
+        negative_markers = {"するな", "やるな", "禁止", "しない", "避け", "控え", "超えるな", "変えるな", "復唱するな"}
+
+        # Tokenize statements into keyword sets (Japanese-aware)
+        _PARTICLE_RE = re.compile(
+            r'[、。・\s\u3000（）「」/,.\-]|'  # punctuation
+            r'(?<=[^\u3040-\u309F])[をにはがでとのもへから]{1,2}(?=[^\u3040-\u309F])|'  # particles between non-hiragana
+            r'(?<=.)[をにはがでとのもへ](?=.)'  # single particles mid-word
+        )
+
+        def extract_keywords(text: str) -> set[str]:
+            # Split on particles and punctuation
+            tokens = _PARTICLE_RE.split(text)
+            result = set()
+            for t in tokens:
+                t = t.strip()
+                if len(t) >= 2:
+                    result.add(t)
+                    # Also add sub-tokens for compound words
+                    for sub in re.split(r'[をにはがでとのもへ]', t):
+                        sub = sub.strip()
+                        if len(sub) >= 2:
+                            result.add(sub)
+            return result
+
+        def has_positive(text: str) -> bool:
+            return any(m in text for m in positive_markers)
+
+        def has_negative(text: str) -> bool:
+            return any(m in text for m in negative_markers)
+
+        # Find candidate pairs
+        candidates = []
+        existing = self.history.load_tensions()
+        existing_pairs = {(t.rule_a_id, t.rule_b_id) for t in existing}
+        existing_pairs |= {(t.rule_b_id, t.rule_a_id) for t in existing}
+
+        for i, (id_a, text_a) in enumerate(statements):
+            kw_a = extract_keywords(text_a)
+            for j, (id_b, text_b) in enumerate(statements):
+                if j <= i:
+                    continue
+                if (id_a, id_b) in existing_pairs:
+                    continue
+
+                kw_b = extract_keywords(text_b)
+                overlap = kw_a & kw_b
+
+                # Need shared keywords and opposing directives.
+                # Filter out overly generic shared words.
+                _GENERIC_WORDS = {
+                    "ユーザー", "タスク", "作業", "実行", "確認", "提案",
+                    "コード", "修正", "バグ", "テスト", "セッション",
+                    "ファイル", "データ", "結果", "報告", "指示",
+                }
+                meaningful_overlap = overlap - _GENERIC_WORDS
+                # Require 1+ meaningful keyword, or 2+ any keywords
+                if not meaningful_overlap and len(overlap) < 2:
+                    continue
+
+                a_pos, a_neg = has_positive(text_a), has_negative(text_a)
+                b_pos, b_neg = has_positive(text_b), has_negative(text_b)
+
+                # Opposing: one positive + one negative, OR both positive but
+                # the overlapping keyword context suggests opposition
+                if (a_pos and b_neg) or (a_neg and b_pos):
+                    candidates.append({
+                        "rule_a_id": id_a,
+                        "rule_a_text": text_a,
+                        "rule_b_id": id_b,
+                        "rule_b_text": text_b,
+                        "shared_keywords": sorted(overlap),
+                        "opposition_type": "directive",
+                    })
+
+        return candidates
+
+    def save_tension(
+        self,
+        *,
+        rule_a_id: str,
+        rule_a_text: str,
+        rule_b_id: str,
+        rule_b_text: str,
+        boundary: str = "",
+        signal: str = "",
+        scopes: list[str] | None = None,
+        confidence: float = 0.0,
+    ) -> Tension:
+        """Save a tension (contradiction pair with boundary condition)."""
+        from datetime import datetime as _dt
+
+        now = _dt.now().strftime("%Y/%m/%d %H:%M")
+        tension_id = f"tension-{_dt.now().strftime('%Y%m%d%H%M%S%f')}"
+
+        tension = Tension(
+            id=tension_id,
+            rule_a_id=rule_a_id,
+            rule_a_text=rule_a_text,
+            rule_b_id=rule_b_id,
+            rule_b_text=rule_b_text,
+            boundary=boundary,
+            signal=signal,
+            scopes=scopes or [],
+            confidence=confidence,
+            created_at=now,
+            updated_at=now,
+        )
+
+        tensions = self.history.load_tensions()
+        tensions.append(tension)
+        self.history.write_tensions(tensions)
+        return tension
+
+    def _build_tension_guidance(self) -> str:
+        """Build guidance from active tensions for context injection.
+
+        Tensions are the highest-signal knowledge: not what to do, but
+        *when to switch* between opposing rules.
+        """
+        tensions = self.history.load_tensions()
+        active = [t for t in tensions if t.status == "active" and t.boundary]
+        if not active:
+            return ""
+        lines = ["[判断境界 — 矛盾モンタージュから抽出された切り替え基準]"]
+        for t in active[:10]:  # Cap at 10 to avoid context bloat
+            lines.append(f"\n  A: {t.rule_a_text}")
+            lines.append(f"  B: {t.rule_b_text}")
+            lines.append(f"  → 境界: {t.boundary}")
+            if t.signal:
+                lines.append(f"  → 切替シグナル: {t.signal}")
+        lines.append("")
+        lines.append("上記の各ペアは矛盾ではなく、状況依存の切り替え。")
+        lines.append("境界条件を見て、今の場面でどちらに重みがある��判断せよ。")
+        return "\n".join(lines)
 
     def _build_policy_guidance(self) -> str:
         """Build guidance from active policies for injection into context.

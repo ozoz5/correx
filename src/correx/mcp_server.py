@@ -133,7 +133,17 @@ def _summarize_transition(transition: Any) -> dict[str, Any]:
     }
 
 
-def _memory_summary(service: CorrexService) -> dict[str, Any]:
+def _memory_summary(service: CorrexService, *, compact: bool = True) -> dict[str, Any]:
+    """Return memory statistics.
+
+    When *compact=True* (default for inline tool responses), return only
+    counts — no lists.  This keeps tool output short and avoids flooding
+    the user's screen with JSON.
+
+    When *compact=False* (used by the ``memory://summary`` resource),
+    include the detailed latest_entries / latest_preference_rules /
+    latest_context_transitions arrays.
+    """
     entries = service.list_entries()
     turns = service.list_conversation_turns()
     rules = service.list_preference_rules()
@@ -151,27 +161,32 @@ def _memory_summary(service: CorrexService) -> dict[str, Any]:
         if getattr(getattr(entry, "training_example", None), "accepted", False)
     ]
     personality = service.history.load_personality()
-    return {
-        "memory_dir": str(service.base_dir),
-        "entry_count": len(entries),
-        "conversation_turn_count": len(turns),
-        "preference_rule_count": len(rules),
-        "promoted_rule_count": len(stable_rules),
-        "high_value_rule_count": len(high_value_rules),
-        "general_rule_count": len(general_rules),
-        "mixed_rule_count": len(mixed_rules),
-        "local_rule_count": len(local_rules),
-        "latent_context_count": latent_context_count,
-        "context_transition_count": len(transitions),
-        "meaning_count": len(meanings),
-        "cross_scope_meanings": len([m for m in meanings if m.cross_scope_count >= 2]),
-        "accepted_training_example_count": len(trainable_entries),
-        "personality_metabolism": personality.get("metabolism_label", "unknown"),
-        "personality_digestibility": personality.get("digestibility_label", "unknown"),
-        "latest_entries": [_summarize_entry(entry) for entry in entries[:5]],
-        "latest_preference_rules": [_summarize_rule(rule) for rule in rules[:5]],
-        "latest_context_transitions": [_summarize_transition(item) for item in transitions[:5]],
+    result: dict[str, Any] = {
+        "entries": len(entries),
+        "turns": len(turns),
+        "rules": len(rules),
+        "promoted": len(stable_rules),
+        "meanings": len(meanings),
+        "transitions": len(transitions),
     }
+    if not compact:
+        # Full version — used by memory://summary resource only
+        result.update({
+            "memory_dir": str(service.base_dir),
+            "high_value_rule_count": len(high_value_rules),
+            "general_rule_count": len(general_rules),
+            "mixed_rule_count": len(mixed_rules),
+            "local_rule_count": len(local_rules),
+            "latent_context_count": latent_context_count,
+            "cross_scope_meanings": len([m for m in meanings if m.cross_scope_count >= 2]),
+            "accepted_training_example_count": len(trainable_entries),
+            "personality_metabolism": personality.get("metabolism_label", "unknown"),
+            "personality_digestibility": personality.get("digestibility_label", "unknown"),
+            "latest_entries": [_summarize_entry(entry) for entry in entries[:5]],
+            "latest_preference_rules": [_summarize_rule(rule) for rule in rules[:5]],
+            "latest_context_transitions": [_summarize_transition(item) for item in transitions[:5]],
+        })
+    return result
 
 
 def create_mcp_server(
@@ -199,7 +214,7 @@ def create_mcp_server(
     @mcp.resource("memory://summary")
     def memory_summary() -> str:
         """Read a compact summary of stored episodes, corrections, and training state."""
-        return json.dumps(_memory_summary(service), ensure_ascii=False, indent=2)
+        return json.dumps(_memory_summary(service, compact=False), ensure_ascii=False, indent=2)
 
     @mcp.resource("memory://entries/{limit}")
     def recent_entries(limit: int = 10) -> str:
@@ -243,11 +258,7 @@ def create_mcp_server(
         ghost_principles = service.get_fired_ghost_principles()
         return {
             "guidance_context": guidance,
-            "task_title": task_title,
-            "issuer": issuer,
-            "task_scope": task_scope,
             "ghost_principles_count": len(ghost_principles),
-            "ghost_principles": ghost_principles,
         }
 
     @mcp.tool()
@@ -395,7 +406,6 @@ def create_mcp_server(
             "ok": True,
             "count": len(transitions),
             "items": [_summarize_transition(item) for item in transitions[:10]],
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -412,7 +422,6 @@ def create_mcp_server(
             "ok": True,
             "total": len(rules),
             "promoted": len(promoted),
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -447,7 +456,6 @@ def create_mcp_server(
                 }
                 for m in meanings[:15]
             ],
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -499,7 +507,6 @@ def create_mcp_server(
                 }
                 for p in principles
             ],
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -605,6 +612,87 @@ def create_mcp_server(
             "count": len(policies),
         }
 
+    # ── Tension — Contradiction Montage ─────────────��──────────
+
+    @mcp.tool()
+    def detect_tension_candidates() -> dict[str, Any]:
+        """Detect contradicting rule pairs for the client LLM to refine.
+
+        Server-side heuristic: finds pairs of promoted rules / ghost principles
+        that share topic keywords but have opposing directives (しろ vs するな).
+
+        The client LLM should:
+        1. Review each candidate pair
+        2. Determine if it's a genuine contradiction (not just different scopes)
+        3. Extract the boundary condition: "when A applies, when B applies"
+        4. Call save_tension() with the boundary
+
+        This is the Contradiction Montage pipeline — extracting *judgment*
+        (when to switch between rules) rather than just rules themselves.
+        """
+        candidates = service.detect_tension_candidates()
+        return {
+            "ok": True,
+            "count": len(candidates),
+            "candidates": candidates,
+            "instructions": (
+                "Review each pair. For genuine contradictions, extract the "
+                "boundary condition (いつAで、いつBか) and call save_tension(). "
+                "Skip pairs that are merely about different scopes/topics."
+            ),
+        }
+
+    @mcp.tool()
+    def list_tensions(active_only: bool = False) -> dict[str, Any]:
+        """List all detected tensions (contradiction pairs with boundary conditions).
+
+        Tensions represent the highest form of learned knowledge: not WHAT to do,
+        but WHEN to switch between opposing rules. Each tension has:
+        - rule_a / rule_b: the contradicting pair
+        - boundary: the decision function ("when A, when B")
+        - signal: what observable cue triggers the switch
+        """
+        tensions = service.list_tensions(active_only=active_only)
+        return {
+            "items": [_to_plain_data(t) for t in tensions],
+            "count": len(tensions),
+        }
+
+    @mcp.tool()
+    def save_tension(
+        rule_a_id: str,
+        rule_a_text: str,
+        rule_b_id: str,
+        rule_b_text: str,
+        boundary: str = "",
+        signal: str = "",
+        scopes: list[str] | None = None,
+        confidence: float = 0.0,
+    ) -> dict[str, Any]:
+        """Save a tension — a contradiction pair with its boundary condition.
+
+        Call this after reviewing candidates from detect_tension_candidates().
+        The boundary should describe WHEN each rule applies:
+        e.g., "方針が不明なら確認。方針が明確なら即実行"
+
+        The signal should identify the observable cue that triggers the switch:
+        e.g., "ユーザーの指示の具体性レベル"
+        """
+        tension = service.save_tension(
+            rule_a_id=rule_a_id,
+            rule_a_text=rule_a_text,
+            rule_b_id=rule_b_id,
+            rule_b_text=rule_b_text,
+            boundary=boundary,
+            signal=signal,
+            scopes=scopes,
+            confidence=confidence,
+        )
+        return {
+            "ok": True,
+            "tension": _to_plain_data(tension),
+        }
+
     @mcp.tool()
     def predict_next_contexts(
         previous_context_nodes: list[dict] | None = None,
@@ -672,7 +760,6 @@ def create_mcp_server(
                 for sig in interventions
             ],
             "intervention_count": len(interventions),
-            "memory_summary": _memory_summary(service),
             "self_overcome_proposals": service.self_overcome(),
         }
 
@@ -717,8 +804,8 @@ def create_mcp_server(
             await ctx.info(f"Saved episode {entry.id}: {entry.title}")
         return {
             "ok": True,
-            "entry": _to_plain_data(entry),
-            "memory_summary": _memory_summary(service),
+            "entry_id": entry.id,
+            "title": entry.title,
         }
 
     @mcp.tool()
@@ -755,7 +842,6 @@ def create_mcp_server(
         return {
             "ok": saved,
             "entry_id": entry_id,
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -809,10 +895,10 @@ def create_mcp_server(
 
         result: dict[str, Any] = {
             "ok": True,
-            "turn": _to_plain_data(turn),
+            "turn_id": turn.id,
+            "task_scope": turn.task_scope or "",
             "reaction_score": turn.reaction_score,
             "guidance_applied": turn.guidance_applied,
-            "memory_summary": _memory_summary(service),
         }
 
         # Optionally record the rejected proposal as a ghost
@@ -884,7 +970,6 @@ def create_mcp_server(
         return {
             "ok": saved,
             "entry_id": entry_id,
-            "memory_summary": _memory_summary(service),
         }
 
     @mcp.tool()
@@ -1412,6 +1497,135 @@ def create_mcp_server(
             "new_positives": new_positives,
             "new_ghosts": new_ghosts,
             "total_turns_now": len(existing_ids),
+        }
+
+    @mcp.tool()
+    def get_unprocessed_turns(
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Get conversation turns that have empty extracted_corrections.
+
+        These turns were imported (e.g. via ingest_claude_sessions) but their
+        correction rules haven't been extracted yet. The client LLM should:
+        1. Read each turn's user_message + assistant_message + user_feedback
+        2. Extract generalized rules (「次回以降も使える一般化されたルール」)
+        3. Call update_turn_corrections() to save the extracted rules
+
+        Args:
+            limit: Max turns to return per call. Default 20.
+            offset: Skip this many unprocessed turns.
+        """
+        turns = service.history.load_conversation_turns()
+        unprocessed = [
+            t for t in turns
+            if not getattr(t, "extracted_corrections", None)
+            and (getattr(t, "user_feedback", "") or getattr(t, "user_message", ""))
+        ]
+        total = len(unprocessed)
+        page = unprocessed[offset:offset + limit]
+
+        return {
+            "ok": True,
+            "total_unprocessed": total,
+            "returned": len(page),
+            "offset": offset,
+            "turns": [
+                {
+                    "id": getattr(t, "id", ""),
+                    "task_scope": getattr(t, "task_scope", ""),
+                    "user_message": (getattr(t, "user_message", "") or "")[:500],
+                    "assistant_message": (getattr(t, "assistant_message", "") or "")[:500],
+                    "user_feedback": (getattr(t, "user_feedback", "") or "")[:500],
+                    "reaction_score": getattr(t, "reaction_score", None),
+                    "tags": getattr(t, "tags", []),
+                }
+                for t in page
+            ],
+        }
+
+    @mcp.tool()
+    def update_turn_corrections(
+        turn_id: str,
+        extracted_corrections: list[str],
+    ) -> dict[str, Any]:
+        """Update a conversation turn with extracted correction rules.
+
+        Called by the client LLM after reading unprocessed turns from
+        get_unprocessed_turns(). The corrections should be generalized rules
+        that apply beyond this specific turn.
+
+        Args:
+            turn_id: The turn ID to update.
+            extracted_corrections: List of generalized rules extracted by the LLM.
+        """
+        if not turn_id:
+            return {"ok": False, "error": "turn_id is required"}
+        if not extracted_corrections:
+            return {"ok": False, "error": "extracted_corrections cannot be empty"}
+
+        turns = service.history.load_conversation_turns()
+        found = False
+        for t in turns:
+            if getattr(t, "id", "") == turn_id:
+                t.extracted_corrections = extracted_corrections
+                found = True
+                break
+
+        if not found:
+            return {"ok": False, "error": f"Turn {turn_id} not found"}
+
+        service.history.write_conversation_turns(turns)
+
+        # Trigger rule promotion for the new corrections
+        try:
+            service.history.rebuild_preference_rules()
+        except Exception:
+            pass
+
+        return {
+            "ok": True,
+            "turn_id": turn_id,
+            "corrections_count": len(extracted_corrections),
+        }
+
+    @mcp.tool()
+    def process_ingested_data() -> dict[str, Any]:
+        """Run post-processing pipeline on ingested data.
+
+        Call this after ingest_claude_sessions + update_turn_corrections
+        to rebuild rules, synthesize patterns, and prepare for sublimation.
+        No LLM needed for this step — it's pure data processing.
+
+        Pipeline:
+        1. rebuild_preference_rules (promote patterns from corrections)
+        2. synthesize_rules (derive rule hypotheses from patterns)
+        3. Return stats + count of pending sublimations for client LLM
+        """
+        # 1. Rebuild rules
+        rules_before = len(service.history.load_preference_rules())
+        try:
+            service.history.rebuild_preference_rules()
+        except Exception:
+            pass
+        rules_after = len(service.history.load_preference_rules())
+
+        # 2. Count pending sublimations
+        trajectories = service.list_ghost_trajectories(include_fired=True)
+        pending_sublimations = sum(
+            1 for t in trajectories
+            if t.get("fired") and not t.get("sublimated_principle")
+        )
+
+        return {
+            "ok": True,
+            "rules_before": rules_before,
+            "rules_after": rules_after,
+            "new_rules": rules_after - rules_before,
+            "pending_sublimations": pending_sublimations,
+            "next_step": "Call get_pending_sublimations() and sublimate each trajectory"
+            if pending_sublimations > 0
+            else "No pending sublimations. Pipeline complete.",
         }
 
     @mcp.tool()
