@@ -1434,8 +1434,60 @@ class CorrexService:
         return self.growth.trend(case_id)
 
     def growth_summary(self) -> dict:
-        """Overall growth summary across all cases."""
-        return self.growth.summary()
+        """Overall growth summary from ConversationTurn reaction scores.
+
+        Replaces old record_growth-based computation (was unreliable/negative).
+        Uses actual user reaction data directly.
+        """
+        turns = self.history.load_conversation_turns()
+        scored = [t for t in turns if t.reaction_score is not None]
+        if not scored:
+            return {"total_turns": 0, "average_delta": 0.0, "overall_trend": "no_data",
+                    "guided_vs_unguided": {}, "temporal": {}, "correction_rate": {}}
+
+        guided = [t for t in scored if getattr(t, "guidance_applied", False)]
+        unguided = [t for t in scored if not getattr(t, "guidance_applied", False)]
+
+        def _avg(ts: list) -> float:
+            return sum(t.reaction_score for t in ts) / len(ts) if ts else 0.0
+
+        def _neg_rate(ts: list) -> float:
+            return sum(1 for t in ts if t.reaction_score < 0.4) / len(ts) if ts else 0.0
+
+        guided_avg = _avg(guided)
+        unguided_avg = _avg(unguided)
+        guidance_delta = guided_avg - unguided_avg if guided and unguided else 0.0
+
+        half = len(scored) // 2
+        early, late = scored[:half], scored[half:]
+        temporal_delta = _avg(late) - _avg(early)
+
+        trend = ("growing" if temporal_delta > 0.05
+                 else "flat" if temporal_delta >= -0.05
+                 else "degrading")
+
+        return {
+            "total_turns": len(scored),
+            "average_delta": round(guidance_delta, 4),
+            "overall_trend": trend,
+            "guided_vs_unguided": {
+                "guided_count": len(guided),
+                "guided_avg": round(guided_avg, 3),
+                "unguided_count": len(unguided),
+                "unguided_avg": round(unguided_avg, 3),
+                "delta": round(guidance_delta, 3),
+            },
+            "temporal": {
+                "early_avg": round(_avg(early), 3),
+                "late_avg": round(_avg(late), 3),
+                "delta": round(temporal_delta, 3),
+            },
+            "correction_rate": {
+                "early": round(_neg_rate(early), 3),
+                "late": round(_neg_rate(late), 3),
+                "delta": round(_neg_rate(late) - _neg_rate(early), 3),
+            },
+        }
 
     def save_secret(self, account_name: str, secret_value: str) -> bool:
         return set_secure_secret(account_name, secret_value)
