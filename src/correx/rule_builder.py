@@ -500,10 +500,10 @@ def compute_self_overcome_proposals(rules: list[PreferenceRule]) -> list[dict]:
                 "reason": f"confidence={conf:.2f}, evidence={ev}: 根拠が薄い。降格して再検証すべき",
             })
 
+    from .text_similarity import ngram_overlap as _ngram_overlap
+
     seen_pairs: set[tuple[str, str]] = set()
     for i, a in enumerate(promoted):
-        a_text = a.instruction.lower()
-        a_bigrams = {a_text[k:k+2] for k in range(len(a_text)-1)}
         for j, b in enumerate(promoted):
             if j <= i:
                 continue
@@ -511,11 +511,7 @@ def compute_self_overcome_proposals(rules: list[PreferenceRule]) -> list[dict]:
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
-            b_text = b.instruction.lower()
-            b_bigrams = {b_text[k:k+2] for k in range(len(b_text)-1)}
-            if not a_bigrams or not b_bigrams:
-                continue
-            overlap = len(a_bigrams & b_bigrams) / min(len(a_bigrams), len(b_bigrams))
+            overlap = _ngram_overlap(a.instruction, b.instruction)
             if overlap > 0.4 and a.applies_to_scope == b.applies_to_scope:
                 keep = a if (getattr(a, "confidence_score", 0) or 0) >= (getattr(b, "confidence_score", 0) or 0) else b
                 drop = b if keep == a else a

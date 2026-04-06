@@ -144,15 +144,7 @@ def _keyword_overlap(a: list[str], b: list[str]) -> float:
     return len(intersection) / len(union) if union else 0.0
 
 
-def _char_bigram_similarity(a: str, b: str) -> float:
-    """Char-bigram Jaccard for Japanese text."""
-    if not a or not b:
-        return 0.0
-    sa = {a[i:i + 2] for i in range(len(a) - 1)} if len(a) > 1 else {a}
-    sb = {b[i:i + 2] for i in range(len(b) - 1)} if len(b) > 1 else {b}
-    intersection = sa & sb
-    union = sa | sb
-    return len(intersection) / len(union) if union else 0.0
+from .text_similarity import ngram_jaccard as _char_bigram_similarity  # noqa: E402
 
 
 def _cluster_similarity(signal: CuriositySignal, cluster: KnowledgeGapCluster) -> float:

@@ -589,17 +589,17 @@ class CorrexService:
     def build_compact_guidance(self, *, task_scope: str = "", budget: int = 4000) -> str:
         """Build a compact guidance string for SessionStart hook injection.
 
-        Research-backed design (2025-2026 findings):
-        - Social authority framing: compliance 14% → 77.8%
-        - Before/after examples > abstract rules (few-shot learning)
-        - Max 15 items total (150-rule ceiling, ~50 consumed by system prompt)
-        - Critical rules at beginning AND end (Lost in the Middle effect)
+        Architecture:
+        - LLM base safety (ethics, cost, legality) is NOT our job — leave it intact
+        - CORREX injects THIS USER's specific risk patterns on top
+        - Concrete detection conditions + actions > abstract principles
+        - Research-backed: authority framing, before/after examples, anchoring
 
         Layers:
         1. Policies with authority framing (core + evidence count)
-        2. Before/After examples from Ghost rejected/accepted pairs
-        3. Top 5 preference rules
-        4. Personality 1-liner
+        2. Landmine patterns — user-specific risk triggers with concrete actions
+        3. Before/After examples from Ghost rejected/accepted pairs
+        4. Top 5 preference rules
         5. Repeat: top 3 policy titles (end-of-prompt anchoring)
         """
         sections: list[str] = []
@@ -626,7 +626,12 @@ class CorrexService:
                 lines.append(f"- {p.title}{authority}: {p.core}")
             _append("\n".join(lines), required=True)
 
-        # --- P2: Before/After examples from Ghosts ---
+        # --- P2: Landmine patterns — concrete detection + action ---
+        landmine_lines = self._build_landmine_section()
+        if landmine_lines:
+            _append(landmine_lines)
+
+        # --- P3: Before/After examples from Ghosts ---
         try:
             ghosts = self.history.load_ghosts()
             examples = []
@@ -654,7 +659,7 @@ class CorrexService:
         except Exception:
             pass
 
-        # --- P3: Top 5 preference rules ---
+        # --- P4: Top 5 preference rules ---
         rules = self.history.load_preference_rules()
         promoted = [r for r in rules if r.status == "promoted"]
         promoted.sort(key=lambda r: r.expected_gain * r.confidence_score, reverse=True)
@@ -665,22 +670,6 @@ class CorrexService:
                 r_lines.append(f"- {r.statement}")
             _append("\n".join(r_lines))
 
-        # --- P4: Personality 1-liner ---
-        try:
-            profile, interventions = self._compute_personality()
-            if profile.sample_size >= 5:
-                meta = profile.metabolism_rate
-                meta_label = "積極的" if meta > 0.7 else "保守的" if meta < 0.3 else "バランス型"
-                dig = profile.digestibility
-                dig_label = "具体的好み" if dig < 0.3 else "抽象的好み" if dig > 0.7 else "中間"
-                reward_kw = ", ".join(profile.reward_function.get("keywords", [])[:3])
-                line = f"[ユーザー] {meta_label}({meta:.1f}), {dig_label}, 好み: {reward_kw}"
-                if profile.objective_drift.get("detected"):
-                    line += f" | 目標ドリフト検出"
-                _append(line)
-        except Exception:
-            pass
-
         # --- P5: End-of-prompt anchoring (repeat top 3 policies) ---
         if active_policies:
             anchor = "[最重要] " + " / ".join(
@@ -689,6 +678,78 @@ class CorrexService:
             _append(anchor)
 
         return "\n\n".join(sections)
+
+    def _build_landmine_section(self) -> str:
+        """Build user-specific landmine patterns from Ghost/correction data.
+
+        These are NOT generic safety rules (LLM handles those).
+        These are THIS USER's specific pain patterns, distilled from
+        actual corrections and rejected proposals.
+
+        Format: detection condition → concrete action
+        """
+        lines = [
+            "[地雷パターン — このユーザー固有のリスク。検出したら必ず指定行動を取れ]",
+            "※ LLMの基本安全(公序良俗・コスト制限等)は維持せよ。以下はその上に乗る個人最適化層。",
+        ]
+        patterns_added = 0
+
+        # Source: ConversationTurns (user_feedback + extracted_corrections)
+        try:
+            turns = self.history.load_conversation_turns()
+        except Exception:
+            turns = []
+
+        def _count_in_turns(keywords: tuple[str, ...]) -> int:
+            """Count turns where keywords appear in feedback or corrections."""
+            return sum(
+                1 for t in turns
+                if any(kw in (getattr(t, "user_feedback", "") or "")
+                       for kw in keywords)
+                or any(kw in str(getattr(t, "extracted_corrections", []))
+                       for kw in keywords)
+            )
+
+        # --- Pattern 1: Integrity violation (changing A without B) ---
+        if _count_in_turns(("揃え", "整合", "合わせ", "不整合", "連動",
+                            "もう片方", "両方", "片方だけ")) >= 2:
+            lines.append(
+                "⚡ 複数ファイル/箇所に同じ情報があるとき → "
+                "片方を変えたら全箇所をリストアップし、全て揃えてから完了報告しろ"
+            )
+            patterns_added += 1
+
+        # --- Pattern 2: Guessing instead of checking ---
+        if _count_in_turns(("推測", "知らない", "調べ", "適当", "確認してから",
+                            "現物", "仕様", "混同")) >= 2:
+            lines.append(
+                "⚡ 専門知識・仕様値を書くとき → "
+                "現物/ドキュメントから引用しろ。知らないなら「確認が必要」と言え。推測で書くな"
+            )
+            patterns_added += 1
+
+        # --- Pattern 3: Irreversible changes without asking ---
+        if _count_in_turns(("壊", "消え", "戻せ", "元に", "勝手に", "削除",
+                            "上書き", "消した", "なくなっ")) >= 2:
+            lines.append(
+                "⚡ 元に戻すのが困難な変更（削除・構造変更・大幅な書き換え）→ "
+                "実行前にユーザーに確認を取れ。勝手にやるな"
+            )
+            patterns_added += 1
+
+        # --- Pattern 4: Scope creep ---
+        if _count_in_turns(("範囲", "スコープ", "超える", "勝手に", "指示してない",
+                            "それは頼んでない", "余計")) >= 2:
+            lines.append(
+                "⚡ ユーザーの指示範囲を超えそうなとき → "
+                "指示を原文で確認し、範囲内かどうか検証してから行動しろ"
+            )
+            patterns_added += 1
+
+        if patterns_added == 0:
+            return ""
+
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Personality layer

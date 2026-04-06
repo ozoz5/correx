@@ -445,6 +445,64 @@ _RE_EN_INTENSIFIED_NEGATIVE = re.compile(
 )
 
 
+# ============================================================
+# SMART MARKER MATCHING — boundary-aware, negation-aware
+# ============================================================
+
+# Japanese negation suffixes that flip sentiment when they follow a marker.
+# e.g. "悪くない" (not bad) = praise, not negative.
+_JA_NEGATION_RE = re.compile(
+    r"(?:く|じゃ|では|で|と?は)?"  # optional conjugation bridge
+    r"(?:ない|なかった|ぬ)"          # negation (ん excluded — too ambiguous with emphatic んだ/んです)
+)
+
+# Characters that indicate a Japanese marker is part of a larger word
+# (not a standalone sentiment signal).
+_JA_CONTINUATION = re.compile(r"[ぁ-ん]")
+
+_ASCII_RE = re.compile(r"^[a-zA-Z0-9\s'\-]+$")
+
+
+def _is_ascii_marker(marker: str) -> bool:
+    return bool(_ASCII_RE.match(marker))
+
+
+def _has_marker(
+    text: str,
+    markers: tuple[str, ...],
+    *,
+    check_negation: bool = False,
+) -> bool:
+    """Check if any marker appears in text with boundary and negation awareness.
+
+    - English markers use word-boundary matching (\\b).
+    - Japanese markers check for negation suffixes when check_negation=True.
+    """
+    for marker in markers:
+        if _is_ascii_marker(marker):
+            # English: word boundary check
+            pattern = r"\b" + re.escape(marker) + r"\b"
+            if re.search(pattern, text, re.IGNORECASE):
+                if check_negation:
+                    # English negation already handled by caller's _negation_flips
+                    pass
+                return True
+        else:
+            # Japanese: simple substring check
+            idx = text.find(marker)
+            if idx < 0:
+                continue
+
+            if check_negation:
+                # Check if a negation suffix follows the marker
+                after = text[idx + len(marker) : idx + len(marker) + 6]
+                if _JA_NEGATION_RE.match(after):
+                    continue  # negated — skip this marker
+
+            return True
+    return False
+
+
 def _check_regex_negative(text: str) -> bool:
     """Check if any regex-based negative patterns match."""
     return bool(
@@ -507,12 +565,12 @@ def score_reaction(
     )
     feedback_for_negative = _negation_flips.sub("", feedback)
 
-    # Detect tone signals (marker-based)
-    has_strong_rejection = any(marker in feedback_for_negative for marker in STRONG_REJECTION_MARKERS)
-    has_negative = any(marker in feedback_for_negative for marker in NEGATIVE_MARKERS)
-    has_strong_praise = any(marker in feedback for marker in STRONG_PRAISE_MARKERS)
-    has_praise = any(marker in feedback for marker in PRAISE_MARKERS)
-    has_direction = any(marker in feedback for marker in DIRECTION_MARKERS)
+    # Detect tone signals (boundary-aware marker matching)
+    has_strong_rejection = _has_marker(feedback_for_negative, STRONG_REJECTION_MARKERS)
+    has_negative = _has_marker(feedback_for_negative, NEGATIVE_MARKERS, check_negation=True)
+    has_strong_praise = _has_marker(feedback, STRONG_PRAISE_MARKERS, check_negation=True)
+    has_praise = _has_marker(feedback, PRAISE_MARKERS, check_negation=True)
+    has_direction = _has_marker(feedback, DIRECTION_MARKERS)
 
     # Regex-based detection (catches verb conjugations, prohibition forms, etc.)
     has_regex_negative = _check_regex_negative(feedback)

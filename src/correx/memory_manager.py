@@ -175,23 +175,8 @@ def archive_turns_to_episode(
 # 2. Rule Compression — merge similar rules
 # ---------------------------------------------------------------------------
 
-def _char_ngrams(text: str, n: int = 2) -> set[str]:
-    """Extract character n-grams for fuzzy matching. Default bigram for CJK."""
-    text = re.sub(r"\s+", "", text.lower())
-    if len(text) < n:
-        return {text} if text else set()
-    return {text[i : i + n] for i in range(len(text) - n + 1)}
-
-
-def _ngram_similarity(a: str, b: str) -> float:
-    """Jaccard similarity of character trigrams."""
-    ngrams_a = _char_ngrams(a)
-    ngrams_b = _char_ngrams(b)
-    if not ngrams_a or not ngrams_b:
-        return 0.0
-    intersection = ngrams_a & ngrams_b
-    union = ngrams_a | ngrams_b
-    return len(intersection) / len(union) if union else 0.0
+from .text_similarity import char_ngrams as _char_ngrams  # noqa: E402
+from .text_similarity import ngram_jaccard as _ngram_similarity  # noqa: E402
 
 
 def derive_context_mode(

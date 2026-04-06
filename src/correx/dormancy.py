@@ -24,19 +24,11 @@ import re
 # Similarity helpers (same char-bigram approach as cleanup_overfitting.py)
 # ---------------------------------------------------------------------------
 
-def _bigrams(text: str) -> set[str]:
-    """Character 2-grams for Japanese text similarity."""
-    t = re.sub(r"[\s、。をのがはでにと]", "", text)
-    if len(t) < 2:
-        return set()
-    return {t[i:i + 2] for i in range(len(t) - 1)}
+from .text_similarity import ngram_jaccard  # noqa: E402
 
 
 def _jaccard(a: str, b: str) -> float:
-    ba, bb = _bigrams(a), _bigrams(b)
-    if not ba or not bb:
-        return 0.0
-    return len(ba & bb) / len(ba | bb)
+    return ngram_jaccard(a, b, particles=True)
 
 
 # ---------------------------------------------------------------------------
