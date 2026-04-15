@@ -43,12 +43,16 @@ After weeks of use, your Claude is not the same as anyone else's Claude.
 
 This is a live system. These numbers are from real usage, not a demo.
 
-**Memory after a few weeks of use:**
+**Memory after real-world usage:**
 
 ```
-Rules:      100 total  (44 promoted, 56 still learning)
-Turns:       77 recorded corrections
-Meanings:    25 cross-scope patterns extracted
+Rules:      152 total  (121 promoted, 31 still learning)
+Laws:        76 autonomous principles (Ghost-sublimated)
+Ghosts:    1588 rejected proposals tracked
+Turns:      128 recorded corrections
+Meanings:    32 cross-scope patterns extracted
+Policies:    10 deep behavioral policies
+Journeys:     8 episodic search memories
 ```
 
 **Sample promoted rules (extracted from real corrections):**
@@ -76,9 +80,7 @@ Meanings:    25 cross-scope patterns extracted
 
 ```
 $ python -m pytest tests/ -q
-......................................................................
-..................
-57 passed in 2.03s
+113 passed in 1.53s
 ```
 
 ---
@@ -90,8 +92,10 @@ Engram is the memory layer inside CORREX. It operates in three learning layers:
 | Layer | Signal | What it does |
 |---|---|---|
 | **Surface** (corrections) | User says "wrong" | Extracts rules, promotes to meanings/principles |
-| **Ghost** (anger) | User rejects AI proposal | Clusters rejections, autonomously extracts principles |
+| **Ghost** (rejection) | User rejects AI proposal | Clusters rejections, autonomously extracts laws |
 | **Curiosity** (questions) | User asks questions | Tracks knowledge gaps, warns before frustration |
+| **Journey** (exploration) | AI visits URLs/files | Episodic memory with dormancy/awakening |
+| **Autonomous** (self-reflection) | Engine tick | Cross-layer modulation, predictions, self-overcome |
 
 Rules promote only when they appear consistently across sessions.
 Low-confidence rules are automatically demoted.
@@ -229,15 +233,18 @@ Features:
 ```
 correx/
   src/correx/
-    mcp_server.py          # MCP tool definitions
+    mcp_server.py          # MCP tool definitions (40+ tools)
     service.py             # Core service layer
-    history_store.py       # Persistence + I/O orchestration
+    history_store.py       # Persistence + atomic I/O
     rule_builder.py        # Pure rule construction logic (no I/O)
-    memory_manager.py      # Conflict resolution, self-correction
     meaning_synthesis.py   # Engram: rules → meanings → principles
-    personality_layer.py   # Behavioral profiling
-    llm_scorer.py          # Reaction scoring (Anthropic API / rule-based fallback)
-  tests/                   # 57 tests passing
+    personality_layer.py   # Behavioral profiling (6 dimensions)
+    ghost_engine.py        # Rejection → trajectory → autonomous law
+    autonomous.py          # Cross-layer intelligence engine (~900 lines)
+    dormancy.py            # Dormancy / awakening / forgetting
+    text_similarity.py     # Bigram similarity for deduplication
+    analytics.py           # Growth & engagement analytics
+  tests/                   # 113 tests passing
 ```
 
 All data stored as JSON in `~/.correx/`. No database required.
@@ -275,13 +282,15 @@ CORREX is specific intelligence for one person.
 
 ## Status
 
-- ✅ Working prototype
-- ✅ 90 tests passing
-- ✅ Running in production (single-user, local JSON)
-- 🔄 Multi-user / hosted version in progress
+- ✅ Production-ready (single-user, local JSON)
+- ✅ 113 tests passing
+- ✅ 5-layer Engram engine (Surface → Ghost → Curiosity → Journey → Autonomous)
+- ✅ Policy synthesis pipeline (corrections → rules → meanings → principles → policies)
+- ✅ Dashboard with real-time visualization
+- 🔄 npm package for easy installation
 
 ---
 
 ## License
 
-MIT
+BSL-1.1

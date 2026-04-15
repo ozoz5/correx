@@ -267,6 +267,8 @@ def forget_stale(
             # Handle both ISO and slash formats
             if "T" in fired_at:
                 fired_dt = datetime.fromisoformat(fired_at)
+                if fired_dt.tzinfo is None:
+                    fired_dt = fired_dt.replace(tzinfo=timezone.utc)
             else:
                 fired_dt = datetime.strptime(fired_at, "%Y/%m/%d %H:%M")
                 fired_dt = fired_dt.replace(tzinfo=timezone.utc)
@@ -315,6 +317,8 @@ def forget_stale_rules(
         try:
             if "T" in updated:
                 dt = datetime.fromisoformat(updated)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
             else:
                 dt = datetime.strptime(updated, "%Y/%m/%d %H:%M")
                 dt = dt.replace(tzinfo=timezone.utc)
@@ -327,3 +331,95 @@ def forget_stale_rules(
             remaining.append(r)
 
     return remaining, forgotten
+
+
+# ---------------------------------------------------------------------------
+# Ghost semanticization — episodic → semantic memory transformation
+# ---------------------------------------------------------------------------
+
+# Decay timelines by origin (emotional tag)
+_GHOST_DECAY_DAYS: dict[str, dict[str, int]] = {
+    "scolded":   {"gist": 60,  "trace": 180},  # strong emotion → slow decay
+    "corrected": {"gist": 30,  "trace": 90},    # medium
+    "rejected":  {"gist": 20,  "trace": 60},    # weak signal → fast decay
+}
+
+
+def semanticize_ghosts(
+    ghosts: list[dict],
+    trajectories: list[dict],
+) -> tuple[list[dict], dict[str, int]]:
+    """Gradually degrade Ghost episodic content, preserving metadata.
+
+    Like the brain's episodic → semantic transformation:
+    - Full text → gist (truncated to 50 chars) → trace (text cleared)
+    - Timing depends on emotional tag (origin): scolded slowest, rejected fastest
+    - Only degrades ghosts whose trajectory has already fired (principle extracted)
+    - Unfired trajectory ghosts are still "in hippocampus" — kept intact
+
+    Returns (modified ghosts, stats: {gisted, traced, skipped}).
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+
+    # Build set of fired trajectory IDs
+    fired_ids = {
+        t.get("id") for t in trajectories
+        if t.get("fired")
+    }
+
+    stats = {"gisted": 0, "traced": 0, "skipped": 0}
+
+    for g in ghosts:
+        # Skip ghosts not in a fired trajectory (still learning)
+        traj_id = g.get("trajectory_id", "")
+        if not traj_id or traj_id not in fired_ids:
+            stats["skipped"] += 1
+            continue
+
+        # Already fully traced (no text left)
+        ro = g.get("rejected_output", "")
+        po = g.get("predicted_outcome", "")
+        ao = g.get("actual_outcome", "")
+        if not ro and not po and not ao:
+            continue
+
+        # Parse creation date
+        created = g.get("created_at", "")
+        if not created:
+            continue
+        try:
+            if "T" in created:
+                created_dt = datetime.fromisoformat(created)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+            else:
+                created_dt = datetime.strptime(created, "%Y/%m/%d %H:%M")
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+
+        age_days = (now - created_dt).days
+        origin = g.get("origin", "rejected")
+        decay = _GHOST_DECAY_DAYS.get(origin, _GHOST_DECAY_DAYS["rejected"])
+
+        if age_days >= decay["trace"]:
+            # Phase 3: trace — clear all text, keep metadata skeleton
+            g["rejected_output"] = ""
+            g["predicted_outcome"] = ""
+            g["actual_outcome"] = ""
+            g["semanticized"] = "trace"
+            stats["traced"] += 1
+        elif age_days >= decay["gist"]:
+            # Phase 2: gist — truncate to first 50 chars
+            if len(ro) > 50:
+                g["rejected_output"] = ro[:50] + "..."
+            if len(po) > 50:
+                g["predicted_outcome"] = po[:50] + "..."
+            if len(ao) > 50:
+                g["actual_outcome"] = ao[:50] + "..."
+            g["semanticized"] = "gist"
+            stats["gisted"] += 1
+
+    return ghosts, stats

@@ -7,6 +7,7 @@ from src.correx.dormancy import (
     awaken_relevant,
     check_coverage,
     scan_and_dormant,
+    semanticize_ghosts,
 )
 
 
@@ -210,3 +211,81 @@ class TestAwakenRelevant:
             scope="general",
         )
         assert len(awakened) == 0
+
+
+class TestSemanticizeGhosts:
+    """Test episodic → semantic Ghost memory transformation."""
+
+    def _make_ghost(self, origin="rejected", age_days=0, trajectory_id="traj-1"):
+        from datetime import datetime, timezone, timedelta
+        created = (datetime.now(timezone.utc) - timedelta(days=age_days)).strftime("%Y/%m/%d %H:%M")
+        return {
+            "id": f"ghost-{age_days}-{origin}",
+            "created_at": created,
+            "rejected_output": "A" * 100,
+            "predicted_outcome": "B" * 80,
+            "actual_outcome": "C" * 60,
+            "prediction_error": 0.7,
+            "origin": origin,
+            "task_scope": "test",
+            "trajectory_id": trajectory_id,
+        }
+
+    def _fired_trajectory(self, tid="traj-1"):
+        return {"id": tid, "fired": True}
+
+    def _unfired_trajectory(self, tid="traj-2"):
+        return {"id": tid, "fired": False}
+
+    def test_unfired_trajectory_ghosts_untouched(self):
+        ghosts = [self._make_ghost(age_days=100, trajectory_id="traj-2")]
+        trajectories = [self._unfired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["skipped"] == 1
+        assert len(ghosts[0]["rejected_output"]) == 100
+
+    def test_rejected_gist_at_20_days(self):
+        ghosts = [self._make_ghost(origin="rejected", age_days=25, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["gisted"] == 1
+        assert ghosts[0]["rejected_output"].endswith("...")
+        assert len(ghosts[0]["rejected_output"]) <= 54
+
+    def test_rejected_trace_at_60_days(self):
+        ghosts = [self._make_ghost(origin="rejected", age_days=65, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["traced"] == 1
+        assert ghosts[0]["rejected_output"] == ""
+        assert ghosts[0]["predicted_outcome"] == ""
+        assert ghosts[0]["actual_outcome"] == ""
+        assert ghosts[0]["semanticized"] == "trace"
+        assert ghosts[0]["prediction_error"] == 0.7
+
+    def test_scolded_slow_decay(self):
+        ghosts = [self._make_ghost(origin="scolded", age_days=50, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["gisted"] == 0
+        assert len(ghosts[0]["rejected_output"]) == 100
+
+    def test_scolded_gist_at_60_days(self):
+        ghosts = [self._make_ghost(origin="scolded", age_days=65, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["gisted"] == 1
+
+    def test_scolded_not_traced_at_90_days(self):
+        ghosts = [self._make_ghost(origin="scolded", age_days=100, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["gisted"] == 1
+        assert stats["traced"] == 0
+
+    def test_young_ghost_untouched(self):
+        ghosts = [self._make_ghost(origin="rejected", age_days=5, trajectory_id="traj-1")]
+        trajectories = [self._fired_trajectory()]
+        _, stats = semanticize_ghosts(ghosts, trajectories)
+        assert stats["gisted"] == 0
+        assert stats["traced"] == 0

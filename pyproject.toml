@@ -16,6 +16,9 @@ keywords = [
     "ai", "correction", "memory", "mcp", "llm",
     "preference-learning", "feedback-loop", "lora",
 ]
+dependencies = [
+    "mcp[cli]>=1.9.4,<2",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

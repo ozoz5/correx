@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -1414,21 +1415,19 @@ def create_mcp_server(
         )
 
         def _infer_scope(name: str) -> str:
+            """Infer task scope from Claude project directory name."""
             n = name.lower()
-            if "疑似知性" in name or "-----" in n: return "correx_development"
             if "document" in n: return "document_creation"
-            if "ecrc" in n: return "ecrc_project"
-            if "antigravity" in n: return "game_development"
             return "general"
 
         # Load existing to avoid duplicates
         existing_turns = service.history.load_conversation_turns()
-        existing_ids = {t.get("id", "") for t in existing_turns}
+        existing_ids = {getattr(t, "id", "") for t in existing_turns}
         # Also track by original_id in metadata to prevent duplicates on re-run
         existing_ids.update(
-            t.get("metadata", {}).get("original_id", "")
+            getattr(t, "metadata", {}).get("original_id", "")
             for t in existing_turns
-            if t.get("metadata", {}).get("source") == "ingest_claude_sessions"
+            if getattr(t, "metadata", {}).get("source") == "ingest_claude_sessions"
         )
 
         new_corrections = 0
@@ -1527,8 +1526,8 @@ def create_mcp_server(
                                 source_turn_id=turn_id,
                             )
                             new_ghosts += 1
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[correx] ghost save failed: {e}", file=sys.stderr)
                     else:
                         new_positives += 1
 
@@ -1622,8 +1621,8 @@ def create_mcp_server(
         # Trigger rule promotion for the new corrections
         try:
             service.history.rebuild_preference_rules()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[correx] rule rebuild failed: {e}", file=sys.stderr)
 
         return {
             "ok": True,
@@ -1648,8 +1647,8 @@ def create_mcp_server(
         rules_before = len(service.history.load_preference_rules())
         try:
             service.history.rebuild_preference_rules()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[correx] rule rebuild failed: {e}", file=sys.stderr)
         rules_after = len(service.history.load_preference_rules())
 
         # 2. Count pending sublimations
@@ -1814,6 +1813,183 @@ def create_mcp_server(
             task_title=task_title,
             corrections_this_session=corrections_this_session,
         )
+
+    # ── Journey Memory (episodic memory from searches/exploration) ────────
+
+    @mcp.tool()
+    def save_journey(
+        where: str,
+        scope: str = "",
+        impression: list[str] | None = None,
+        valence: float = 0.5,
+        journey_type: str = "wander",
+        detail: str = "",
+        connected_turn_id: str = "",
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Save an episodic journey memory — a trace of search or exploration.
+
+        Call this when the AI visits a URL, reads a file, or explores a codebase.
+        journey_type: "business" (user-requested, never forgotten) or "wander" (incidental, forgettable).
+        impression: keyword traces of what was found (not full content).
+        valence: 0.0 (useless) to 1.0 (treasure).
+        """
+        j = service.save_journey(
+            where=where,
+            scope=scope,
+            impression=impression,
+            valence=valence,
+            journey_type=journey_type,
+            detail=detail,
+            connected_turn_id=connected_turn_id,
+            tags=tags,
+        )
+        return {
+            "ok": True,
+            "journey_id": j["id"],
+            "novelty": j["novelty"],
+            "journey_type": j["journey_type"],
+        }
+
+    @mcp.tool()
+    def awaken_journeys(
+        context_keywords: list[str],
+        scope: str = "",
+        threshold: float = 0.2,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        """Find journey memories triggered by current context (déjà vu).
+
+        Pass keywords from the current task. Returns journeys whose impressions
+        overlap — places the AI has been before that may be relevant now.
+        Dormant journeys that match are awakened automatically.
+        """
+        results = service.awaken_journeys(
+            context_keywords=context_keywords,
+            scope=scope,
+            threshold=threshold,
+            limit=limit,
+        )
+        compact = [
+            {
+                "id": r["journey"]["id"],
+                "where": r["journey"].get("where", ""),
+                "scope": r["journey"].get("scope", ""),
+                "impression": r["journey"].get("impression", []),
+                "similarity": r["similarity"],
+                "band": r.get("band", ""),
+                "deja_vu": r["deja_vu"],
+            }
+            for r in results
+        ]
+        return {
+            "ok": True,
+            "awakened_count": len(compact),
+            "journeys": compact,
+        }
+
+    @mcp.tool()
+    def update_journey(
+        journey_id: str,
+        impression: list[str] | None = None,
+        valence: float | None = None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        """Update a journey during its labile window (30min after awakening).
+
+        Only recently awakened journeys can be updated. This implements memory
+        reconsolidation: recalled memories become temporarily malleable.
+        Use this to enrich a journey with new impressions discovered during revisit.
+        """
+        return service.update_journey(
+            journey_id=journey_id,
+            impression=impression,
+            valence=valence,
+            detail=detail,
+        )
+
+    @mcp.tool()
+    def list_journeys(
+        limit: int = 20,
+        journey_type: str = "",
+        include_dormant: bool = False,
+    ) -> dict[str, Any]:
+        """List stored journey memories (episodic traces of searches and exploration)."""
+        journeys = service.list_journeys(
+            limit=limit,
+            journey_type=journey_type,
+            include_dormant=include_dormant,
+        )
+        compact = [
+            {
+                "id": j["id"],
+                "where": j.get("where", ""),
+                "scope": j.get("scope", ""),
+                "journey_type": j.get("journey_type", ""),
+                "impression": j.get("impression", []),
+                "valence": j.get("valence", 0),
+                "awakened_count": j.get("awakened_count", 0),
+            }
+            for j in journeys
+        ]
+        return {
+            "ok": True,
+            "total": len(compact),
+            "journeys": compact,
+        }
+
+    @mcp.tool()
+    def scan_journey_dormancy(
+        max_idle_days: int = 30,
+    ) -> dict[str, Any]:
+        """Scan journeys for dormancy and forgetting. Wander journeys go dormant after 7 idle days, forgotten after max_idle_days."""
+        return service.dormant_journeys(max_idle_days=max_idle_days)
+
+    # ── Autonomous Intelligence Engine ────────────────────────────────────
+
+    @mcp.tool()
+    def run_autonomous_tick(
+        event_type: str = "",
+        scope: str = "",
+        tags: list[str] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Run one tick of the autonomous intelligence engine (LLM-free).
+
+        The engine processes all layers simultaneously: rules, ghosts, journeys,
+        policies, tensions, and transitions. Returns applicable rules, predictions,
+        and cross-layer modulations.
+
+        event_type: "correction", "praise", "question", "time", "ghost_fire".
+        Empty = self-reflection mode (finds weakest knowledge area).
+        """
+        return service.run_autonomous_tick(
+            event_type=event_type,
+            scope=scope,
+            tags=tags,
+            keywords=keywords,
+        )
+
+    @mcp.tool()
+    def get_engine_state() -> dict[str, Any]:
+        """Get the current state of the autonomous intelligence engine.
+
+        Returns cycle count, last prediction, scope coverage map,
+        and prediction error history.
+        """
+        return service.get_engine_state()
+
+    @mcp.tool()
+    def semanticize_ghost_memories() -> dict[str, Any]:
+        """Run episodic-to-semantic transformation on Ghost memories.
+
+        Like the brain: specific episodes ("I said X and got scolded")
+        gradually fade to gist (truncated) then trace (metadata only).
+        The lesson (sublimated principle) survives; the episode fades.
+        Decay speed: scolded=slow (180d), corrected=medium (90d), rejected=fast (60d).
+        Only affects ghosts in fired trajectories (principle already extracted).
+        """
+        return service.semanticize_ghost_memories()
 
     return mcp
 

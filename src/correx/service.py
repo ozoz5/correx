@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .auto_train import run_auto_training_cycle
-from .dormancy import awaken_relevant, forget_stale, forget_stale_rules, scan_and_dormant
+from .dormancy import awaken_relevant, forget_stale, forget_stale_rules, scan_and_dormant, semanticize_ghosts
 from .growth_tracker import GrowthRecord, GrowthTracker
 from .history_store import HistoryStore
 from .llm_scorer import Backend, LlmScorer
@@ -120,6 +120,7 @@ class CorrexService:
         self.history = HistoryStore(self.base_dir, scorer=scorer)
         self.growth = GrowthTracker(self.base_dir)
         self._scorer = scorer
+        self._autonomous_engine = None  # lazy init
 
     def save_episode(
         self,
@@ -2416,4 +2417,378 @@ class CorrexService:
             self.history.write_ghost_trajectories(trajectories)
         stats["trajectories_cleaned"] = traj_cleaned
 
+        return stats
+
+    # ── Journey Memory ───────────────────────────────────────────────────
+
+    def save_journey(
+        self,
+        *,
+        where: str,
+        scope: str = "",
+        impression: list[str] | None = None,
+        valence: float = 0.5,
+        journey_type: str = "wander",
+        detail: str = "",
+        connected_turn_id: str = "",
+        tags: list[str] | None = None,
+    ) -> dict:
+        """Save an episodic journey memory (search/exploration trace).
+
+        journey_type:
+          - "business": user-requested research. Full detail, never forgotten.
+          - "wander": incidental exploration. Impressions only, forgettable.
+        """
+        import hashlib
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M")
+        impression = impression or []
+        tags = tags or []
+
+        # Compute novelty: how different from existing journeys
+        existing = self.history.load_journeys()
+        similar_count = 0
+        imp_set = set(impression)
+        for j in existing:
+            j_imp = set(j.get("impression", []))
+            if imp_set and j_imp:
+                overlap = len(imp_set & j_imp) / max(len(imp_set | j_imp), 1)
+                if overlap > 0.3:
+                    similar_count += 1
+
+        novelty = 1.0 / (similar_count + 1)
+        forgettable = journey_type != "business"
+
+        import uuid
+        journey_id = hashlib.sha256(
+            f"{where}:{now}:{scope}:{uuid.uuid4().hex[:8]}".encode()
+        ).hexdigest()[:16]
+
+        # SWR tag: reward-weighted consolidation priority
+        # High valence + connected to a turn = high consolidation priority
+        swr_tag = round(valence * (1.0 if connected_turn_id else 0.5), 3)
+
+        journey_dict = {
+            "id": f"journey-{journey_id}",
+            "where": where,
+            "when": now,
+            "scope": scope,
+            "impression": impression,
+            "valence": round(valence, 3),
+            "novelty": round(novelty, 3),
+            "journey_type": journey_type,
+            "detail": detail if journey_type == "business" else "",
+            "connected_turn_id": connected_turn_id,
+            "tags": tags,
+            "dormant": False,
+            "awakened_count": 0,
+            "revisit_count": 0,
+            "forgettable": forgettable,
+            "swr_tag": swr_tag,
+            "labile_until": "",
+        }
+
+        self.history.save_journey(journey_dict)
+        return journey_dict
+
+    @staticmethod
+    def _similarity_band(similarity: float) -> str:
+        """Classify similarity into neuroscience-inspired bands.
+
+        <0.15  = irrelevant (no signal)
+        0.15-0.35 = weak_association (faint familiarity)
+        0.35-0.65 = deja_vu (the productive middle — highest creative potential)
+        >0.65  = direct_match (strong recall)
+        """
+        if similarity < 0.15:
+            return "irrelevant"
+        if similarity < 0.35:
+            return "weak_association"
+        if similarity < 0.65:
+            return "deja_vu"
+        return "direct_match"
+
+    def awaken_journeys(
+        self,
+        *,
+        context_keywords: list[str],
+        scope: str = "",
+        threshold: float = 0.2,
+        limit: int = 5,
+    ) -> list[dict]:
+        """Find and awaken dormant journey memories triggered by current context.
+
+        Returns list of awakened journeys with similarity band classification.
+        Bands: irrelevant (<0.15), weak_association (0.15-0.35),
+               deja_vu (0.35-0.65), direct_match (>0.65).
+        Awakened journeys enter a 30-minute labile window where they can be updated.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        journeys = self.history.load_journeys()
+        context_set = set(context_keywords)
+        if not context_set:
+            return []
+
+        awakened = []
+        changed = False
+        now = datetime.now(timezone.utc)
+        labile_until = (now + timedelta(minutes=30)).isoformat()
+
+        for j in journeys:
+            j_imp = set(j.get("impression", []))
+            if not j_imp:
+                continue
+
+            overlap = len(context_set & j_imp) / max(len(context_set | j_imp), 1)
+
+            if scope and j.get("scope") == scope:
+                overlap += 0.15
+
+            band = self._similarity_band(overlap)
+            if band == "irrelevant":
+                continue
+
+            if overlap > threshold:
+                if j.get("forgotten", False):
+                    continue  # forgotten journeys cannot awaken
+                if j.get("dormant", False):
+                    j["dormant"] = False
+                    j["awakened_count"] = j.get("awakened_count", 0) + 1
+                    j["labile_until"] = labile_until  # Labile Window: 30min update window
+                    changed = True
+                j["revisit_count"] = j.get("revisit_count", 0) + 1
+                changed = True
+                awakened.append({
+                    "journey": j,
+                    "similarity": round(overlap, 3),
+                    "band": band,
+                    "deja_vu": j.get("awakened_count", 0) > 1,
+                })
+
+        if changed:
+            self.history.write_journeys(journeys)
+
+        awakened.sort(key=lambda x: x["similarity"], reverse=True)
+        return awakened[:limit]
+
+    def update_journey(
+        self,
+        *,
+        journey_id: str,
+        impression: list[str] | None = None,
+        valence: float | None = None,
+        detail: str | None = None,
+    ) -> dict:
+        """Update a journey during its labile window (30min after awakening).
+
+        Only awakened journeys within their labile window can be updated.
+        This implements memory reconsolidation: recalled memories become
+        temporarily malleable before re-stabilizing.
+        """
+        from datetime import datetime, timezone
+
+        journeys = self.history.load_journeys()
+        now = datetime.now(timezone.utc)
+
+        for j in journeys:
+            if j.get("id") != journey_id:
+                continue
+
+            # Check labile window
+            labile_str = j.get("labile_until", "")
+            if not labile_str:
+                return {"ok": False, "error": "not_labile", "message": "Journey is not in labile state"}
+
+            try:
+                labile_dt = datetime.fromisoformat(labile_str)
+                if now > labile_dt:
+                    j["labile_until"] = ""  # Window closed
+                    self.history.write_journeys(journeys)
+                    return {"ok": False, "error": "window_closed", "message": "Labile window has expired"}
+            except (ValueError, TypeError):
+                return {"ok": False, "error": "invalid_labile", "message": "Invalid labile timestamp"}
+
+            # Update allowed fields
+            if impression is not None:
+                j["impression"] = impression
+            if valence is not None:
+                j["valence"] = round(valence, 3)
+                # Recompute SWR tag
+                connected = bool(j.get("connected_turn_id"))
+                j["swr_tag"] = round(valence * (1.0 if connected else 0.5), 3)
+            if detail is not None:
+                j["detail"] = detail
+
+            self.history.write_journeys(journeys)
+            return {"ok": True, "journey_id": journey_id, "labile_remaining_sec": max(0, int((labile_dt - now).total_seconds()))}
+
+        return {"ok": False, "error": "not_found", "message": f"Journey {journey_id} not found"}
+
+    def list_journeys(
+        self,
+        *,
+        limit: int = 20,
+        journey_type: str = "",
+        include_dormant: bool = False,
+    ) -> list[dict]:
+        """List stored journey memories."""
+        journeys = self.history.load_journeys()
+        journeys = [j for j in journeys if not j.get("forgotten", False)]
+        if journey_type:
+            journeys = [j for j in journeys if j.get("journey_type") == journey_type]
+        if not include_dormant:
+            journeys = [j for j in journeys if not j.get("dormant", False)]
+        return journeys[:limit]
+
+    def dormant_journeys(self, *, max_idle_days: int = 30) -> dict:
+        """Scan journeys for dormancy, forgetting, and labile window expiry.
+
+        SWR protection: journeys with swr_tag >= 0.7 are immune to forgetting
+        (like high-reward memories consolidated during sleep).
+        Labile windows: expired labile_until timestamps are cleared.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        journeys = self.history.load_journeys()
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=max_idle_days)
+        dormant_count = 0
+        forgotten_count = 0
+        labile_expired = 0
+
+        for j in journeys:
+            # Close expired labile windows
+            labile_str = j.get("labile_until", "")
+            if labile_str:
+                try:
+                    labile_dt = datetime.fromisoformat(labile_str)
+                    if now > labile_dt:
+                        j["labile_until"] = ""
+                        labile_expired += 1
+                except (ValueError, TypeError):
+                    j["labile_until"] = ""
+
+            if not j.get("forgettable", True):
+                continue
+            if j.get("forgotten", False):
+                continue  # already forgotten, skip
+
+            when_str = j.get("when", "")
+            try:
+                when_dt = datetime.strptime(when_str, "%Y/%m/%d %H:%M").replace(
+                    tzinfo=timezone.utc
+                )
+            except (ValueError, TypeError):
+                continue
+
+            if not j.get("dormant", False):
+                if j.get("awakened_count", 0) == 0:
+                    days_old = (now - when_dt).days
+                    if days_old > 7:
+                        j["dormant"] = True
+                        dormant_count += 1
+            else:
+                # SWR protection: high-value journeys resist forgetting
+                swr = j.get("swr_tag", 0)
+                if swr >= 0.7:
+                    continue  # protected by SWR consolidation
+
+                if j.get("awakened_count", 0) == 0 and when_dt < cutoff:
+                    j["impression"] = []
+                    j["detail"] = ""
+                    j["dormant"] = False
+                    j["forgotten"] = True
+                    forgotten_count += 1
+
+        self.history.write_journeys(journeys)
+        return {
+            "dormant": dormant_count,
+            "forgotten": forgotten_count,
+            "labile_expired": labile_expired,
+            "total": len(journeys),
+        }
+
+    # ── Autonomous Intelligence Engine ────────────────────────────────────
+
+    def _get_engine(self):
+        """Lazy-init the autonomous engine."""
+        if self._autonomous_engine is None:
+            from .autonomous import AutonomousEngine
+            self._autonomous_engine = AutonomousEngine(self.history)
+        return self._autonomous_engine
+
+    def run_autonomous_tick(
+        self,
+        *,
+        event_type: str = "",
+        scope: str = "",
+        tags: list[str] | None = None,
+        keywords: list[str] | None = None,
+    ) -> dict:
+        """Run one tick of the autonomous intelligence engine.
+
+        event_type: "correction", "praise", "question", "time", "ghost_fire"
+                    Empty string = self-reflection mode (no external event).
+        """
+        from .autonomous import Event
+
+        engine = self._get_engine()
+
+        event = None
+        if event_type:
+            event = Event(
+                type=event_type,
+                scope=scope,
+                tags=tags or [],
+                keywords=keywords or [],
+            )
+
+        result = engine.tick(event)
+
+        return {
+            "cycle": result.cycle_count,
+            "rules_count": len(result.decision.applicable_rules),
+            "policies_count": len(result.decision.applicable_policies),
+            "tensions_count": len(result.decision.active_tensions),
+            "awakened_journeys": len(result.decision.awakened_journeys),
+            "weakest_scope": result.decision.weakest_scope,
+            "curiosity_hotspots": result.decision.curiosity_hotspots,
+            "prediction": {
+                "scope": result.prediction.scope,
+                "confidence": result.prediction.confidence,
+            } if result.prediction else None,
+            "verification_error": result.verification_error,
+            "modulations": result.modulations,
+            "cry": {
+                "need_type": result.cry.need.type,
+                "scope": result.cry.need.scope,
+                "urgency": result.cry.need.urgency,
+                "deficit": result.cry.need.deficit,
+                "description": result.cry.need.description,
+                "is_intentional": result.cry.is_intentional,
+                "predicted_effect": result.cry.predicted_effect,
+            } if result.cry else None,
+        }
+
+    def get_engine_state(self) -> dict:
+        """Get the current state of the autonomous engine."""
+        engine = self._get_engine()
+        return engine.get_state()
+
+    # ── Ghost Semanticization ─────────────────────────────────────────────
+
+    def semanticize_ghost_memories(self) -> dict:
+        """Run episodic → semantic transformation on Ghost memories.
+
+        Ghosts in fired trajectories gradually lose text detail:
+        full → gist (50 chars) → trace (metadata only).
+        Decay speed depends on emotional origin (scolded=slow, rejected=fast).
+        """
+        ghosts = self.history.load_ghosts()
+        trajectories = self.history.load_ghost_trajectories()
+        ghosts, stats = semanticize_ghosts(ghosts, trajectories)
+        if stats["gisted"] > 0 or stats["traced"] > 0:
+            self.history.write_ghosts(ghosts)
         return stats

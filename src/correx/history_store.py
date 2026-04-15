@@ -89,6 +89,7 @@ class HistoryStore:
         self.ghosts_file = self.base_dir / "ghosts.json"
         self.ghost_trajectories_file = self.base_dir / "ghost_trajectories.json"
         self.curiosity_signals_file = self.base_dir / "curiosity_signals.json"
+        self.journeys_file = self.base_dir / "journeys.json"
         self.tensions_file = self.base_dir / "tensions.json"
         self.narrative_file = self.base_dir / "narrative.json"
         self.knowledge_gap_clusters_file = self.base_dir / "knowledge_gap_clusters.json"
@@ -975,6 +976,41 @@ class HistoryStore:
                     for t in trajectories
                 ]
             self._atomic_write_json(self.ghost_trajectories_file, trajectories)
+        finally:
+            self._unlock_handle(handle)
+
+    # ── Journey Memory persistence ─────────────────────────────────────────
+
+    def load_journeys(self) -> list[dict]:
+        """Load all stored Journey records."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.journeys_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def write_journeys(self, journeys: list[dict]) -> None:
+        """Atomically write Journey records."""
+        handle = self._lock_handle()
+        try:
+            self._atomic_write_json(self.journeys_file, journeys)
+        finally:
+            self._unlock_handle(handle)
+
+    def save_journey(self, journey_dict: dict) -> None:
+        """Append or update a single journey record."""
+        handle = self._lock_handle()
+        try:
+            journeys = self._read_json_list(self.journeys_file)
+            existing_ids = {j.get("id") for j in journeys}
+            if journey_dict.get("id") not in existing_ids:
+                journeys.insert(0, journey_dict)
+            else:
+                journeys = [
+                    journey_dict if j.get("id") == journey_dict.get("id") else j
+                    for j in journeys
+                ]
+            self._atomic_write_json(self.journeys_file, journeys)
         finally:
             self._unlock_handle(handle)
 
