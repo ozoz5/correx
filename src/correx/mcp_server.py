@@ -1980,6 +1980,22 @@ def create_mcp_server(
         return service.get_engine_state()
 
     @mcp.tool()
+    def record_communication_outcome(
+        need_type: str,
+        resolved: bool,
+    ) -> dict[str, Any]:
+        """Record whether the engine's cry was heard and resolved.
+
+        Call this when the user responds to an engine cry (need).
+        This teaches the engine that expressing needs works,
+        driving the reflexive → intentional transition.
+
+        need_type: The type of need that was expressed (e.g., "knowledge_gap").
+        resolved: True if the user addressed the need, False if ignored.
+        """
+        return service.record_communication_outcome(need_type, resolved)
+
+    @mcp.tool()
     def semanticize_ghost_memories() -> dict[str, Any]:
         """Run episodic-to-semantic transformation on Ghost memories.
 

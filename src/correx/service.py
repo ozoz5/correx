@@ -2792,3 +2792,22 @@ class CorrexService:
         if stats["gisted"] > 0 or stats["traced"] > 0:
             self.history.write_ghosts(ghosts)
         return stats
+
+    # ── Communication Outcome ────────────────────────────────────────────
+
+    def record_communication_outcome(
+        self, need_type: str, resolved: bool,
+    ) -> dict:
+        """Record whether the engine's cry was heard and resolved.
+
+        This is how the engine learns that crying works —
+        the reflexive → intentional transition.
+        """
+        engine = self._get_or_create_engine()
+        engine.record_communication_outcome(need_type, resolved)
+        self._save_engine_state(engine)
+        return {
+            "need_type": need_type,
+            "resolved": resolved,
+            "communication_outcomes": engine._state.get("communication_outcomes", {}),
+        }
