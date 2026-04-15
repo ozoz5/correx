@@ -404,6 +404,28 @@ def semanticize_ghosts(
         origin = g.get("origin", "rejected")
         decay = _GHOST_DECAY_DAYS.get(origin, _GHOST_DECAY_DAYS["rejected"])
 
+        # Ingested ghosts in fired trajectories: principle already extracted,
+        # full text is dead weight. Gist immediately, trace after 7 days.
+        is_ingested = bool(g.get("source_turn_id"))
+        if is_ingested and traj_id in fired_ids:
+            if age_days >= 7:
+                g["rejected_output"] = ""
+                g["predicted_outcome"] = ""
+                g["actual_outcome"] = ""
+                g["semanticized"] = "trace"
+                stats["traced"] += 1
+                continue
+            elif g.get("semanticized") != "gist":
+                if len(ro) > 50:
+                    g["rejected_output"] = ro[:50] + "..."
+                if len(po) > 50:
+                    g["predicted_outcome"] = po[:50] + "..."
+                if len(ao) > 50:
+                    g["actual_outcome"] = ao[:50] + "..."
+                g["semanticized"] = "gist"
+                stats["gisted"] += 1
+                continue
+
         if age_days >= decay["trace"]:
             # Phase 3: trace — clear all text, keep metadata skeleton
             g["rejected_output"] = ""
