@@ -209,22 +209,16 @@ save_conversation_turn(
 
 ## Dashboard
 
-A visual dashboard for monitoring your AI's growth. Included in `dashboard/`.
-
-```bash
-cd dashboard
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`. Point it at your CORREX data directory (`~/.correx/` by default).
+A visual dashboard for monitoring your AI's growth is available as a separate project.
 
 Features:
-- **Tamagotchi** — a pixel art creature that evolves with your AI's personality
-- **Policies / Principles / Rules** — knowledge hierarchy visualization
+- **System Overview** — knowledge hierarchy with live stats
+- **Policies / Principles / Rules** — full knowledge hierarchy visualization
 - **Growth** — before/after quality measurements
-- **Memory Map** — neural network view of rules and connections
-- **History** — correction timeline with reaction scores
+- **Ghost Trajectories** — rejection pattern analysis
+- **Journey Memory** — episodic search traces
+- **Autonomous Engine** — cross-layer modulation view
+- **Tamagotchi** — a pixel art creature that evolves with your AI's personality
 
 ---
 
