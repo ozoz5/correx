@@ -2413,9 +2413,50 @@ class CorrexService:
                 if not is_principle_generalizable(principle):
                     t["sublimated_principle"] = ""
                     traj_cleaned += 1
-        if traj_cleaned > 0:
+
+        # --- Phase 3b: Merge duplicate sublimated_principles across trajectories ---
+        # Keep the first trajectory with each unique principle; merge ghosts into it.
+        # Uses bigram Jaccard (> 0.50) same as Phase 1.
+        seen_principles: list[tuple[set[str], int]] = []  # (bigrams, traj_index)
+        traj_merged = 0
+        for i, t in enumerate(trajectories):
+            if not t.get("fired") or not t.get("sublimated_principle"):
+                continue
+            principle = t["sublimated_principle"]
+            bg = _ts_ngrams(principle, 2, particles=True)
+            if not bg:
+                continue
+            is_dup = False
+            for existing_bg, keeper_idx in seen_principles:
+                if not existing_bg:
+                    continue
+                jaccard = len(bg & existing_bg) / len(bg | existing_bg)
+                if jaccard > 0.50:
+                    keeper = trajectories[keeper_idx]
+                    keeper_ghosts = keeper.get("ghosts", [])
+                    dup_ghosts = t.get("ghosts", [])
+                    existing_ids = {g.get("id", "") for g in keeper_ghosts if g.get("id")}
+                    for g in dup_ghosts:
+                        if g.get("id", "") not in existing_ids:
+                            keeper_ghosts.append(g)
+                    keeper["ghosts"] = keeper_ghosts
+                    keeper["cumulative_pe"] = round(
+                        float(keeper.get("cumulative_pe", 0)) + float(t.get("cumulative_pe", 0)), 4
+                    )
+                    t["sublimated_principle"] = ""
+                    t["fired"] = False
+                    t["dormant"] = True
+                    traj_merged += 1
+                    is_dup = True
+                    break
+            if not is_dup:
+                seen_principles.append((bg, i))
+
+        traj_modified = traj_cleaned + traj_merged
+        if traj_modified > 0:
             self.history.write_ghost_trajectories(trajectories)
         stats["trajectories_cleaned"] = traj_cleaned
+        stats["trajectories_merged"] = traj_merged
 
         return stats
 
