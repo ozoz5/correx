@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from .auto_train import run_auto_training_cycle
 from .dormancy import awaken_relevant, forget_stale, forget_stale_rules, scan_and_dormant
@@ -790,7 +793,7 @@ class CorrexService:
                         if text:
                             laws.append(text)
                 except Exception:
-                    pass
+                    logger.warning("Failed to load ghost laws from %s", path, exc_info=True)
 
         # Collect policy core texts
         policies_text = [p.core for p in self.history.load_policies() if p.maturity == "active"]
@@ -1279,6 +1282,7 @@ class CorrexService:
             )
             universal = r.content[0].text.strip().strip("「」\"'").split("\n")[0]
         except Exception:
+            logger.warning("Auto-sublimation API call failed", exc_info=True)
             return
 
         if not universal or len(universal) < 5:
@@ -1311,6 +1315,7 @@ class CorrexService:
                 m = re.search(r'\d+', answer)
                 law_idx = int(m.group()) if m else 0
             except Exception:
+                logger.warning("Law matching API call failed", exc_info=True)
                 law_idx = 0
 
             if law_idx > 0 and law_idx <= len(laws):

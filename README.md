@@ -76,9 +76,7 @@ Meanings:    25 cross-scope patterns extracted
 
 ```
 $ python -m pytest tests/ -q
-......................................................................
-..................
-57 passed in 2.03s
+127 passed, 1 skipped in 0.50s
 ```
 
 ---
@@ -276,7 +274,7 @@ CORREX is specific intelligence for one person.
 ## Status
 
 - ✅ Working prototype
-- ✅ 90 tests passing
+- ✅ 127 tests passing
 - ✅ Running in production (single-user, local JSON)
 - 🔄 Multi-user / hosted version in progress
 
@@ -284,4 +282,4 @@ CORREX is specific intelligence for one person.
 
 ## License
 
-MIT
+BSL-1.1 (Business Source License)
