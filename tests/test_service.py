@@ -621,6 +621,30 @@ class CorrexServiceTest(unittest.TestCase):
             self.assertEqual(second_entry.id, entries[0].id)
             self.assertEqual(first_entry.id, entries[1].id)
 
+    def test_save_episode_keeps_fresh_entry_when_retention_is_full(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir))
+            for index in range(50):
+                entry = service.save_episode(
+                    title=f"valuable-{index}",
+                    issuer="setohirokazu",
+                    task_type="diagnostic",
+                    source_text="valuable source",
+                )
+                self.assertTrue(
+                    service.save_correction(
+                        entry.id,
+                        correction_note="Keep verified diagnostic memory observable.",
+                    )
+                )
+
+            fresh_entry = service.save_episode(title="fresh low-value diagnostic")
+
+            entries = service.list_entries()
+            self.assertEqual(50, len(entries))
+            self.assertEqual(fresh_entry.id, entries[0].id)
+            self.assertIn(fresh_entry.id, {entry.id for entry in entries})
+
     def test_save_episode_and_reuse_correction(self):
         with TemporaryDirectory() as temp_dir:
             service = CorrexService(Path(temp_dir))
@@ -1036,6 +1060,321 @@ class CorrexServiceTest(unittest.TestCase):
         # Should have exactly one pair of markers
         self.assertEqual(result2.count(MARKER_BEGIN), 1)
         self.assertEqual(result2.count(MARKER_END), 1)
+
+
+class BuildGuidanceContextReturnTraceTest(unittest.TestCase):
+    """Organic Loop v1 — direct MCP build_guidance_context exposes selected IDs.
+
+    These tests pin the contract that:
+    - ``return_trace=False`` (default) returns a string for backward compat
+    - ``return_trace=True`` returns a dict with ``inference_trace`` whose
+      schema matches what chat_adapter.prepare already produces
+    - each call gets a fresh ``guidance_id`` (preflight-scoped, not turn-scoped)
+    - the text from the trace path equals the text from the legacy path
+    """
+
+    REQUIRED_TRACE_KEYS = (
+        "guidance_id",
+        "created_at",
+        "task_scope",
+        "selected_rule_ids",
+        "abstained_rule_ids",
+        "selected_rules",
+        "abstained_rules",
+        "selected_meaning_ids",
+        "selected_principle_ids",
+        "active_context_nodes",
+        "transition_trace",
+        "predicted_next_contexts",
+        "selection_policy",
+    )
+
+    def _seed_turn(self, service: CorrexService) -> None:
+        service.save_conversation_turn(
+            task_scope="proposal_summary",
+            user_message="提案書要約を書け",
+            assistant_message="弊社目線の提案を書いた",
+            user_feedback="貴社視点で書け。必ず具体業務を入れろ。",
+        )
+
+    def _raw_rule(
+        self,
+        rule_id: str,
+        *,
+        status: str,
+        evidence_count: int,
+    ) -> dict:
+        return {
+            "id": rule_id,
+            "statement": f"{rule_id} statement",
+            "normalized_statement": f"{rule_id} statement",
+            "instruction": f"{rule_id} instruction",
+            "status": status,
+            "evidence_count": evidence_count,
+            "first_recorded_at": "2026/04/01 00:00",
+            "last_recorded_at": "2026/04/01 00:00",
+            "applies_to_scope": "proposal_summary",
+            "applies_when_tags": ["proposal_summary", "物流管理"],
+            "negative_conditions": [],
+            "priority": 1,
+            "version": 1,
+            "expires_at": "",
+            "tags": ["proposal_summary", "物流管理"],
+            "source_turn_ids": [],
+            "contexts": [],
+            "latent_contexts": [],
+            "context_mode": "general",
+            "support_score": 4.0,
+            "expected_gain": 4.0,
+            "confidence_score": 0.8,
+            "strong_signal_count": 1,
+            "success_count": 0,
+            "failure_count": 0,
+            "distinct_scope_count": 1,
+            "distinct_tag_count": 2,
+        }
+
+    def test_default_returns_string_for_backward_compat(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            self._seed_turn(service)
+            result = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件の提案書を要約する",
+                task_scope="proposal_summary",
+            )
+            self.assertIsInstance(result, str)
+
+    def test_return_trace_true_returns_dict_with_inference_trace(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            self._seed_turn(service)
+            result = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件の提案書を要約する",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+            self.assertIsInstance(result, dict)
+            self.assertIn("guidance_context", result)
+            self.assertIn("inference_trace", result)
+            self.assertIn("guidance_id", result)
+            trace = result["inference_trace"]
+            for key in self.REQUIRED_TRACE_KEYS:
+                self.assertIn(key, trace, f"missing inference_trace key: {key}")
+            self.assertEqual(trace["selection_policy"], "latent-trace-v2")
+            self.assertEqual(trace["guidance_id"], result["guidance_id"])
+            self.assertIsInstance(trace["selected_rule_ids"], list)
+            self.assertIsInstance(trace["abstained_rule_ids"], list)
+            self.assertTrue(trace["selected_rule_ids"])
+            self.assertEqual(
+                trace["selected_rule_ids"],
+                [item["rule_id"] for item in trace["selected_rules"]],
+            )
+            # Phase 1.1 placeholders: meaning/principle extraction deferred.
+            self.assertEqual(trace["selected_meaning_ids"], [])
+            self.assertEqual(trace["selected_principle_ids"], [])
+
+    def test_return_trace_selection_matches_guidance_status_caps(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            service.history.write_preference_rules_raw(
+                [
+                    self._raw_rule(
+                        f"candidate-rule-{index}",
+                        status="candidate",
+                        evidence_count=20 - index,
+                    )
+                    for index in range(5)
+                ]
+                + [
+                    self._raw_rule(
+                        "promoted-rule",
+                        status="promoted",
+                        evidence_count=1,
+                    )
+                ]
+            )
+
+            result = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+
+            trace = result["inference_trace"]
+            self.assertEqual(
+                trace["selected_rule_ids"],
+                [
+                    "promoted-rule",
+                    "candidate-rule-0",
+                    "candidate-rule-1",
+                    "candidate-rule-2",
+                    "candidate-rule-3",
+                ],
+            )
+            self.assertIn("promoted-rule statement", result["guidance_context"])
+            self.assertNotIn("candidate-rule-4 statement", result["guidance_context"])
+
+    def test_service_trace_helpers_match_chat_adapter_values(self):
+        from correx.chat_adapter import (
+            _evaluate_transition_forecast as adapter_evaluate_transition_forecast,
+            _extract_active_context_nodes as adapter_extract_active_context_nodes,
+        )
+        from correx.service import (
+            _evaluate_transition_forecast as service_evaluate_transition_forecast,
+            _extract_active_context_nodes as service_extract_active_context_nodes,
+        )
+
+        scored_rules = [
+            {
+                "top_context_id": "ctx-low",
+                "top_context_scope": "proposal_summary",
+                "top_context_tags": ["proposal", "物流", "extra", "drop", "ignored"],
+                "top_context_keywords": ["one", "two", "three", "four", "five", "six", "seven"],
+                "top_context_signature": "proposal|a",
+                "top_context_posterior": 0.2,
+            },
+            {
+                "top_context_id": "ctx-high",
+                "top_context_scope": "proposal_summary",
+                "top_context_tags": ["proposal"],
+                "top_context_keywords": ["one"],
+                "top_context_signature": "proposal|a",
+                "top_context_posterior": 0.8,
+            },
+            {
+                "top_context_id": "ctx-other",
+                "top_context_scope": "sales_brief",
+                "top_context_tags": ["sales"],
+                "top_context_keywords": ["brief"],
+                "top_context_signature": "sales|b",
+                "top_context_posterior": 0.5,
+            },
+        ]
+        realized = service_extract_active_context_nodes(scored_rules)
+        self.assertEqual(realized, adapter_extract_active_context_nodes(scored_rules))
+
+        predictions = [
+            {"to_signature": "proposal|a", "score": 0.7},
+            {"to_signature": "missing|x", "score": 0.3},
+            {"to_signature": "", "score": 1.0},
+        ]
+        self.assertEqual(
+            service_evaluate_transition_forecast(predictions, realized),
+            adapter_evaluate_transition_forecast(predictions, realized),
+        )
+
+    def test_guidance_id_is_unique_per_call(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            self._seed_turn(service)
+            first = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+            second = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+            self.assertNotEqual(first["guidance_id"], second["guidance_id"])
+            self.assertEqual(first["guidance_context"], second["guidance_context"])
+
+    def test_return_trace_text_matches_legacy_path(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            self._seed_turn(service)
+            legacy_text = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件",
+                task_scope="proposal_summary",
+            )
+            with_trace = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+            self.assertEqual(legacy_text, with_trace["guidance_context"])
+
+
+class InferenceTraceRoundTripTest(unittest.TestCase):
+    """Organic Loop v1 P1: direct save_conversation_turn persists and restores
+    metadata.inference_trace.
+
+    This is the gluing test. Without it, the selected_rule_ids produced by P0
+    would vanish between preflight and the next session. simulate_benchmark.py
+    relies on this round-trip to compute the 'actual-use A/B' signal later.
+    """
+
+    def test_metadata_inference_trace_round_trips_through_history_store(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            # Seed a prior turn so the rule builder has something to synthesize,
+            # otherwise selected_rule_ids will legitimately be empty.
+            service.save_conversation_turn(
+                task_scope="proposal_summary",
+                user_message="提案書要約を書け",
+                assistant_message="弊社目線の提案を書いた",
+                user_feedback="貴社視点で書け。具体業務を入れろ。",
+            )
+
+            # 1) preflight — produce an inference_trace with a guidance_id
+            prep = service.build_guidance_context(
+                task_title="提案書要約",
+                raw_text="物流管理案件の提案書",
+                task_scope="proposal_summary",
+                return_trace=True,
+            )
+            trace = prep["inference_trace"]
+            guidance_id = prep["guidance_id"]
+            self.assertTrue(guidance_id)
+
+            # 2) save_conversation_turn with metadata={"inference_trace": trace}
+            turn = service.save_conversation_turn(
+                task_scope="proposal_summary",
+                user_message="物流管理案件の提案書を要約してほしい",
+                assistant_message="具体業務を織り込んだ要約を返した",
+                guidance_applied=True,
+                metadata={"inference_trace": trace, "guidance_id": guidance_id},
+            )
+
+            # 3) round-trip — reload and verify the trace survived untouched
+            turns = service.history.load_conversation_turns()
+            target = next((t for t in turns if t.id == turn.id), None)
+            self.assertIsNotNone(target, "saved turn must be retrievable")
+            self.assertTrue(target.guidance_applied)
+            self.assertIsInstance(target.metadata, dict)
+            self.assertIn("inference_trace", target.metadata)
+
+            loaded_trace = target.metadata["inference_trace"]
+            self.assertEqual(loaded_trace["guidance_id"], guidance_id)
+            self.assertEqual(loaded_trace["selection_policy"], "latent-trace-v2")
+            self.assertIn("selected_rule_ids", loaded_trace)
+            self.assertIsInstance(loaded_trace["selected_rule_ids"], list)
+            # Top-level mirror of guidance_id lets downstream tools
+            # (simulate_benchmark.py) join without parsing the nested trace.
+            self.assertEqual(target.metadata.get("guidance_id"), guidance_id)
+
+    def test_metadata_without_inference_trace_still_works(self):
+        """Legacy callers that never pass inference_trace must keep working."""
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir) / "memory")
+            turn = service.save_conversation_turn(
+                task_scope="proposal_summary",
+                user_message="foo",
+                assistant_message="bar",
+            )
+            turns = service.history.load_conversation_turns()
+            target = next((t for t in turns if t.id == turn.id), None)
+            self.assertIsNotNone(target)
+            self.assertIsInstance(target.metadata, dict)
+            self.assertNotIn("inference_trace", target.metadata)
 
 
 if __name__ == "__main__":

@@ -100,6 +100,87 @@ def _deduplicate_ghost_principles(
     return cleaned
 
 
+# NOTE: These two helpers mirror chat_adapter._extract_active_context_nodes and
+# chat_adapter._evaluate_transition_forecast. They are duplicated rather than
+# shared because chat_adapter imports service (moving them into a new module
+# would widen the surface of Organic Loop v1). If a third caller appears,
+# extract into a shared module.
+def _extract_active_context_nodes(scored_rules: list[dict]) -> list[dict]:
+    nodes_by_signature: dict[str, dict] = {}
+    for item in scored_rules:
+        signature = str(item.get("top_context_signature", "")).strip()
+        if not signature:
+            continue
+        node = {
+            "context_id": str(item.get("top_context_id", "")).strip(),
+            "scope": str(item.get("top_context_scope", "")).strip(),
+            "tags": [str(entry).strip() for entry in item.get("top_context_tags", []) if str(entry).strip()][:4],
+            "keywords": [str(entry).strip() for entry in item.get("top_context_keywords", []) if str(entry).strip()][:6],
+            "posterior": float(item.get("top_context_posterior", 0.0) or 0.0),
+            "signature": signature,
+        }
+        existing = nodes_by_signature.get(signature)
+        if existing is None or float(node["posterior"]) > float(existing.get("posterior", 0.0) or 0.0):
+            nodes_by_signature[signature] = node
+    return sorted(
+        nodes_by_signature.values(),
+        key=lambda item: float(item.get("posterior", 0.0) or 0.0),
+        reverse=True,
+    )[:3]
+
+
+def _evaluate_transition_forecast(
+    predicted_next_contexts: list[dict] | None,
+    realized_context_nodes: list[dict] | None,
+) -> dict:
+    predictions = [
+        item
+        for item in (predicted_next_contexts or [])
+        if isinstance(item, dict) and str(item.get("to_signature", "")).strip()
+    ]
+    realized_signatures = {
+        str(item.get("signature", "")).strip()
+        for item in (realized_context_nodes or [])
+        if isinstance(item, dict) and str(item.get("signature", "")).strip()
+    }
+    matched_prediction_signatures = [
+        str(item.get("to_signature", "")).strip()
+        for item in predictions
+        if str(item.get("to_signature", "")).strip() in realized_signatures
+    ]
+    missed_prediction_signatures = [
+        str(item.get("to_signature", "")).strip()
+        for item in predictions
+        if str(item.get("to_signature", "")).strip() not in realized_signatures
+    ]
+    total_score_mass = round(
+        sum(max(0.0, float(item.get("score", 0.0) or 0.0)) for item in predictions),
+        4,
+    )
+    matched_score_mass = round(
+        sum(
+            max(0.0, float(item.get("score", 0.0) or 0.0))
+            for item in predictions
+            if str(item.get("to_signature", "")).strip() in realized_signatures
+        ),
+        4,
+    )
+    top_prediction_signature = str(predictions[0].get("to_signature", "")).strip() if predictions else ""
+    top_prediction_hit = bool(top_prediction_signature and top_prediction_signature in realized_signatures)
+    return {
+        "prediction_available": bool(predictions),
+        "top_prediction_signature": top_prediction_signature,
+        "top_prediction_hit": top_prediction_hit,
+        "matched_prediction_signatures": matched_prediction_signatures[:4],
+        "missed_prediction_signatures": missed_prediction_signatures[:4],
+        "matched_score_mass": matched_score_mass,
+        "total_score_mass": total_score_mass,
+        "coverage_ratio": round(matched_score_mass / total_score_mass, 4) if total_score_mass > 0 else 0.0,
+        "predicted_next_contexts": predictions[:4],
+        "realized_context_signatures": sorted(realized_signatures)[:4],
+    }
+
+
 class CorrexService:
     def __init__(
         self,
@@ -502,7 +583,19 @@ class CorrexService:
             raw_text=raw_text,
             limit=correction_limit,
         )
-        selected_rules = [item for item in rules if item.get("selected_for_guidance", False)][:rule_limit]
+        promoted_rules = [
+            item
+            for item in rules
+            if item.get("selected_for_guidance", False)
+            and item.get("status") == "promoted"
+        ][:rule_limit]
+        candidate_rules = [
+            item
+            for item in rules
+            if item.get("selected_for_guidance", False)
+            and item.get("status") != "promoted"
+        ][:rule_limit]
+        selected_rules = promoted_rules + candidate_rules
         abstained_rules = [item for item in rules if item.get("should_abstain", False)][:rule_limit]
         return {
             "guidance_context": build_conversation_guidance(
@@ -531,7 +624,31 @@ class CorrexService:
         limit: int = 3,
         task_scope: str = "",
         previous_context_nodes: list[dict] | None = None,
-    ) -> str:
+        return_trace: bool = False,
+    ):
+        """Build layered guidance text, optionally with an inference trace.
+
+        When ``return_trace=False`` (default), returns the legacy string so
+        existing callers (direct MCP tools, chat_adapter, CLAUDE.md workflows)
+        are not affected.
+
+        When ``return_trace=True``, returns a dict with:
+            - ``guidance_context``: the same string the legacy path returns
+            - ``inference_trace``: same schema as chat_adapter.prepare produces
+              (selected_rule_ids / abstained_rule_ids / active_context_nodes /
+              transition_trace / predicted_next_contexts / selection_policy)
+              plus ``guidance_id`` and ``created_at`` for Organic Loop tracking
+            - ``guidance_id``: UUID generated per preflight call, not per turn
+              (a turn may reference a guidance_id or none; a guidance_id may
+              be referenced by zero or one turn)
+
+        ``selected_meaning_ids`` and ``selected_principle_ids`` are returned
+        as empty lists for now; extracting them from the meaning/principle
+        layers in ``build_conversation_guidance`` is Phase 1.1 work.
+
+        ``transition_trace`` is recorded for observation only; it is not
+        folded back into candidate selection in v1. That is Phase 2.
+        """
         sections: list[str] = []
         case_guidance = build_case_guidance_context(
             self.history.load_entries(),
@@ -585,7 +702,73 @@ class CorrexService:
         if tension_section:
             sections.append(tension_section)
 
-        return "\n\n".join(section for section in sections if section)
+        guidance_text = "\n\n".join(section for section in sections if section)
+        if not return_trace:
+            return guidance_text
+
+        # ----- Organic Loop v1: inference_trace assembly -----
+        # Reuse analyze_conversation_guidance so selected_rule_ids / abstained_rule_ids
+        # come from exactly the same selection policy that produced guidance_text.
+        analysis = self.analyze_conversation_guidance(
+            task_scope=task_scope or task_title,
+            raw_text=raw_text,
+            previous_context_nodes=previous_context_nodes,
+        )
+        active_context_nodes = _extract_active_context_nodes(analysis["selected_rules"])
+        predicted_next_contexts = self.predict_next_contexts(
+            previous_context_nodes=active_context_nodes,
+            limit=4,
+        )
+        # Direct MCP path does not yet carry previous-turn predictions, so we
+        # record only the current realized nodes; Phase 2 will wire this up.
+        transition_trace = _evaluate_transition_forecast(None, active_context_nodes)
+
+        import uuid as _uuid
+        from datetime import datetime as _dt
+        guidance_id = _uuid.uuid4().hex
+        # Match the existing recorded_at format (naive local, slashes) so
+        # parse_date in simulate_benchmark.py parses both without tz
+        # mismatches. chat_adapter still emits its own trace shape and is
+        # unaffected.
+        created_at = _dt.now().strftime("%Y/%m/%d %H:%M:%S")
+        inference_trace = {
+            "guidance_id": guidance_id,
+            "created_at": created_at,
+            "task_scope": task_scope or task_title,
+            "raw_text_preview": raw_text[:240],
+            "selected_rule_ids": [
+                item.get("rule_id", "")
+                for item in analysis["selected_rules"]
+                if item.get("rule_id")
+            ],
+            "abstained_rule_ids": [
+                item.get("rule_id", "")
+                for item in analysis["abstained_rules"]
+                if item.get("rule_id")
+            ],
+            "selected_rules": analysis["selected_rules"],
+            "abstained_rules": analysis["abstained_rules"],
+            # Phase 1.1: harvest IDs from meaning/principle layers of the
+            # conversation guidance builder. For now, record empty lists so
+            # downstream consumers (simulate_benchmark.py) can rely on the
+            # key being present.
+            "selected_meaning_ids": [],
+            "selected_principle_ids": [],
+            "recent_corrections": analysis["recent_corrections"],
+            "previous_context_nodes": previous_context_nodes
+            if isinstance(previous_context_nodes, list)
+            else [],
+            "active_context_nodes": active_context_nodes,
+            "transition_trace": transition_trace,
+            "predicted_next_contexts": predicted_next_contexts,
+            "abstained_overall": not bool(analysis["selected_rules"]),
+            "selection_policy": "latent-trace-v2",
+        }
+        return {
+            "guidance_context": guidance_text,
+            "inference_trace": inference_trace,
+            "guidance_id": guidance_id,
+        }
 
     def build_compact_guidance(self, *, task_scope: str = "", budget: int = 4000) -> str:
         """Build a compact guidance string for SessionStart hook injection.

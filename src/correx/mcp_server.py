@@ -246,21 +246,45 @@ def create_mcp_server(
         task_scope: str = "",
         company_profile: dict | None = None,
         limit: int = 3,
+        return_trace: bool = False,
     ) -> dict[str, Any]:
-        """Use this when you want reusable human correction memory for a new task prompt."""
-        guidance = service.build_guidance_context(
+        """Use this when you want reusable human correction memory for a new task prompt.
+
+        Set ``return_trace=True`` to also receive ``inference_trace`` and
+        ``guidance_id``. The trace lists the rule/context IDs that produced the
+        guidance text so that, after the turn completes, hit/miss can be
+        measured. Store ``guidance_id`` in
+        ``save_conversation_turn(metadata={"inference_trace": {...}})`` to
+        close the Organic Loop. Default ``False`` preserves the legacy
+        two-field response.
+        """
+        result = service.build_guidance_context(
             company_profile=company_profile,
             task_title=task_title,
             issuer=issuer,
             raw_text=raw_text,
             limit=limit,
             task_scope=task_scope,
+            return_trace=return_trace,
         )
+        if return_trace and isinstance(result, dict):
+            guidance = result.get("guidance_context", "")
+            inference_trace = result.get("inference_trace")
+            guidance_id = result.get("guidance_id")
+        else:
+            guidance = result
+            inference_trace = None
+            guidance_id = None
         ghost_principles = service.get_fired_ghost_principles()
-        return {
+        payload: dict[str, Any] = {
             "guidance_context": guidance,
             "ghost_principles_count": len(ghost_principles),
         }
+        if inference_trace is not None:
+            payload["inference_trace"] = inference_trace
+        if guidance_id is not None:
+            payload["guidance_id"] = guidance_id
+        return payload
 
     @mcp.tool()
     def prepare_chat_session(

@@ -1333,7 +1333,10 @@ class HistoryStore:
         try:
             entries = self._load_entries_unlocked()
             entries.insert(0, entry)
-            entries = evict_episodes(entries, retention_limit=50)
+            # A successful save must remain observable to the caller. Evict
+            # older low-value episodes, but never the freshly returned entry.
+            if len(entries) > 50:
+                entries = [entry, *evict_episodes(entries[1:], retention_limit=49)]
             self._write_entries_unlocked(entries)
         finally:
             self._unlock_handle(handle)
@@ -1636,4 +1639,3 @@ class HistoryStore:
             return False
         finally:
             self._unlock_handle(handle)
-

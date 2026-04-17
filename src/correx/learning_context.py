@@ -383,6 +383,7 @@ def get_relevant_preference_rules(
             continue
         ranked.append(
             {
+                "rule_id": snapshot.get("rule_id", rule.id),
                 "statement": rule.statement,
                 "instruction": rule.instruction,
                 "status": rule.status,
