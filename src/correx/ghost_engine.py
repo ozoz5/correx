@@ -347,9 +347,30 @@ def _blend_themes(theme_a: str, theme_b: str) -> str:
 # Firing detection
 # ---------------------------------------------------------------------------
 
+def calculate_trajectory_confidence(trajectory: GhostTrajectory) -> float:
+    """Calculate confidence that trajectory represents a genuine pattern (not noise).
+
+    Inspired by AgentHER's confidence gating (arXiv:2603.21357).
+
+    Three factors:
+    - count_factor:  more ghosts = more confidence (saturates at 5)
+    - scope_factor:  cross-scope ghosts = more generalizable (saturates at 3)
+    - origin_factor: mixed origins (rejected/scolded/corrected) = robust signal
+
+    Returns:
+        Confidence score in [0.0, 1.0].
+    """
+    count_factor = min(1.0, trajectory.source_ghost_count / 5.0)
+    scope_factor = min(1.0, len(trajectory.scopes) / 3.0)
+    origin_factor = min(1.0, len(trajectory.origin_mix) / 3.0)
+    confidence = 0.5 * count_factor + 0.3 * scope_factor + 0.2 * origin_factor
+    return round(confidence, 3)
+
+
 def should_fire(
     trajectory: GhostTrajectory,
     metabolism_rate: float = 0.5,
+    min_confidence: float = 0.3,
 ) -> bool:
     """Determine if a trajectory should fire based on accumulated prediction error.
 
@@ -357,10 +378,14 @@ def should_fire(
     1. Cumulative PE >= firing threshold
     2. At least 2 ghosts (single observation is not a pattern)
     3. Trajectory is still open
+    4. Confidence score >= min_confidence (noise rejection)
 
     The firing threshold adapts to metabolism_rate:
     - High metabolism (fast learner) → lower threshold → fires sooner
     - Low metabolism (cautious) → higher threshold → needs more evidence
+
+    The confidence gate rejects noise patterns that accumulate high PE
+    quickly but lack scope/origin diversity (e.g., single-session artifacts).
     """
     if trajectory.status != "open":
         return False
@@ -370,7 +395,12 @@ def should_fire(
     # Adaptive threshold: base 1.0, scaled by metabolism
     # metabolism_rate=0.0 → threshold=1.5, 0.5 → 1.0, 1.0 → 0.5
     adaptive_threshold = 1.5 - metabolism_rate
-    return trajectory.cumulative_pe >= adaptive_threshold
+    if trajectory.cumulative_pe < adaptive_threshold:
+        return False
+
+    # Confidence gating: reject low-confidence patterns (noise/single-session artifacts)
+    confidence = calculate_trajectory_confidence(trajectory)
+    return confidence >= min_confidence
 
 
 # ---------------------------------------------------------------------------
