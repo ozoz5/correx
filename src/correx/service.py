@@ -787,8 +787,57 @@ class CorrexService:
             or (c.get("escalation_score", 0) >= 0.5 and c.get("status") != "resolved")
         ]
         interventions = detect_interventions(rules, turns, profile, escalated_clusters=escalated)
+
+        # Auto-demote rules flagged as stale_retention with high confidence
+        demoted_ids = self._auto_demote_stale_rules(rules, interventions)
+        if demoted_ids:
+            self.history.write_preference_rules(rules)
+
         self.history.write_personality(asdict(profile))
         return profile, interventions
+
+    def _auto_demote_stale_rules(
+        self,
+        rules: list,
+        interventions: list,
+        min_confidence: float = 0.7,
+    ) -> list[str]:
+        """Auto-demote rules flagged as stale_retention with high confidence.
+
+        Matches stale_retention signals back to rules via evidence text.
+        Mutates rules in place: status="demoted" + adds "auto_demoted" tag.
+
+        Default min_confidence=0.7 matches failure_count >= 3 in personality_layer
+        (confidence = 0.4 + failure_count * 0.1). So this fires when a promoted
+        rule has failed 3+ times and more than it succeeded.
+
+        Returns list of demoted rule IDs.
+        """
+        import re
+        demoted_ids: list[str] = []
+        stale_signals = [
+            s for s in interventions
+            if s.pattern_type == "stale_retention" and s.confidence >= min_confidence
+        ]
+        if not stale_signals:
+            return demoted_ids
+
+        for signal in stale_signals:
+            # Evidence format: "Rule 'instruction[:40]' failed Nx vs Mx successes"
+            match = re.search(r"Rule '([^']+)' failed", signal.evidence or "")
+            if not match:
+                continue
+            instruction_prefix = match.group(1)
+            for rule in rules:
+                if rule.status != "promoted":
+                    continue
+                if rule.instruction.startswith(instruction_prefix[:40]):
+                    rule.status = "demoted"
+                    if "auto_demoted" not in rule.tags:
+                        rule.tags.append("auto_demoted")
+                    demoted_ids.append(rule.id)
+                    break  # one rule per signal
+        return demoted_ids
 
     def _try_reactivate_deferred(self, task_scope: str = "") -> None:
         """Check if deferred meanings should reactivate given current context."""
