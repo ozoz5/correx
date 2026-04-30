@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "AI Correction OS — persistent human correction memory that makes AI learn from feedback"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "BSL-1.1"}
+license = {text = "MIT"}
 authors = [
-    {name = "ozoz5"},
+    {name = "Hirokazu Seto"},
 ]
 keywords = [
     "ai", "correction", "memory", "mcp", "llm",
@@ -21,6 +21,7 @@ dependencies = [
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",

@@ -1,11 +1,10 @@
 # CORREX
 
-**Every correction you make to Claude becomes a rule. Rules compound. Your AI grows.**
+**AGI is general intelligence for everyone. CORREX is specific intelligence for one person.**
 
-CORREX is an MCP server that captures your feedback and turns it into persistent, injectable memory.
-The more you use it, the more Claude thinks like you.
+CORREX is an MCP server that turns every correction you make to Claude into a persistent, injectable memory. Your feedback compounds. Your AI starts thinking like you.
 
-> Powered by the **Engram engine** — traces behavioral patterns from real interactions, promotes them to rules, and injects them before Claude responds.
+> Powered by the **Engram engine** (surface learning from corrections) and the **Ghost engine** (autonomous learning from rejection).
 
 ---
 
@@ -76,18 +75,20 @@ Journeys:     8 episodic search memories
 | LLM A/B simulation | 0.37 | 0.55 | **+18%** |
 | Commercialization proposal | 0.62 | 0.75 | **+13%** |
 
+> **Measurement method**: `record_growth(case_id, baseline_output, baseline_score, guided_output, guided_score)`. Scores are user-assigned 0.0–1.0 ratings of output quality on the same task with vs. without `build_guidance_context` injection. Sample size is small (single user, N=3 cases above). Reproduction: see `tests/test_service.py::test_record_growth_*`.
+
 **Test suite:**
 
 ```
-$ python -m pytest tests/ -q
-113 passed in 1.53s
+$ python -m pytest tests/ -q --ignore=tests/test_memory_manager.py
+127 passed, 2 skipped in 1.82s
 ```
 
 ---
 
-## The Engram engine
+## The Engram engine — surface learning
 
-Engram is the memory layer inside CORREX. It operates in three learning layers:
+Engram is the visible memory layer. It works in 5 sub-layers:
 
 | Layer | Signal | What it does |
 |---|---|---|
@@ -108,6 +109,38 @@ Engram also builds a **personality profile** (6 dimensions):
 - `digestibility` — abstract vs. concrete preference
 - `curiosity_level` — how often you ask exploratory questions
 - `objective_drift` — whether your goals have shifted
+
+---
+
+## The Ghost engine — autonomous learning from rejection
+
+Most memory systems treat rejection as noise to filter out.
+**CORREX treats rejection as the highest-quality learning signal.**
+
+When you tell Claude *"wrong"*, *"no"*, *"redo"*, *"stop"* — CORREX records the rejected proposal as a **Ghost**. Related Ghosts cluster into **trajectories**. When a trajectory's cumulative prediction error crosses a threshold, it **fires** — and an autonomous principle is born without further human input.
+
+| Property | Value |
+|---|---|
+| Origin types tracked | `rejected`, `corrected`, `scolded` |
+| Cumulative prediction error threshold | 1.0 (configurable) |
+| Auto-sublimation | Principle generated when threshold crossed |
+| Confidence gating | Single-noise Ghosts blocked from auto-firing |
+| Storage | `~/.correx/ghosts.json` + `~/.correx/ghost_trajectories.json` |
+
+**Examples of principles that emerged this way (from real usage):**
+
+```
+答えを持っていないなら虚勢をやめろ           (2 trajectories converged)
+GateGuard を迂回しないように                 (multi-trajectory)
+検出漏れは修正するな                        (2 trajectories converged)
+コーディング作業中は避けるな                 (2 trajectories converged)
+親子関係は避けること                        (2 trajectories converged)
+アンケートは不要とするな                     (2 trajectories converged)
+```
+
+These weren't hand-written. They emerged from rejections, autonomously, and now feed back into Claude's context on every new task.
+
+**Why this matters:** other memory systems (Mem0, Letta, OpenMemory MCP) record what you *say*. CORREX additionally records what you *reject* — and rejection is where your real preferences live.
 
 ---
 
@@ -199,11 +232,13 @@ save_conversation_turn(
 | `synthesize_principles` | Distills principles from meanings |
 | `get_personality_profile` | Shows behavioral profile + self-critique proposals |
 | `synthesize_rules` | Generates rule hypotheses from success/failure patterns |
+| `evaluate_guidance_effectiveness` | Self-assessment of which rules helped on the last task |
 | `record_growth` | Measures before/after quality improvement |
 | `save_curiosity_signal` | Records a user question (classified by client LLM) |
 | `get_cognitive_map` | Shows knowledge gap map by scope |
 | `save_ghost` | Records a rejected AI proposal for autonomous learning |
 | `get_ghost_principles` | Returns autonomously extracted principles |
+| `list_ghost_trajectories` | Lists rejection clusters with firing status |
 
 ---
 
@@ -219,6 +254,8 @@ Features:
 - **Journey Memory** — episodic search traces
 - **Autonomous Engine** — cross-layer modulation view
 - **Tamagotchi** — a pixel art creature that evolves with your AI's personality
+
+> Screenshots & GIF demos: coming. The plant grows slowly. Like your AI.
 
 ---
 
@@ -238,10 +275,12 @@ correx/
     dormancy.py            # Dormancy / awakening / forgetting
     text_similarity.py     # Bigram similarity for deduplication
     analytics.py           # Growth & engagement analytics
-  tests/                   # 113 tests passing
+  tests/                   # 127 tests passing (2 skipped)
 ```
 
 All data stored as JSON in `~/.correx/`. No database required.
+
+> **CI note**: `tests/test_memory_manager.py` is currently `--ignore`d in CI because it covers a deprecated memory backend that's being phased out. Active engine code (`service.py`, `ghost_engine.py`, `autonomous.py`, etc.) is fully covered by the remaining 127 tests.
 
 ---
 
@@ -276,15 +315,19 @@ CORREX is specific intelligence for one person.
 
 ## Status
 
-- ✅ Production-ready (single-user, local JSON)
-- ✅ 113 tests passing
+- ✅ **Local-first beta** (single-user, JSON storage)
+- ✅ 127 tests passing (2 skipped)
 - ✅ 5-layer Engram engine (Surface → Ghost → Curiosity → Journey → Autonomous)
+- ✅ Ghost engine with autonomous principle sublimation
 - ✅ Policy synthesis pipeline (corrections → rules → meanings → principles → policies)
 - ✅ Dashboard with real-time visualization
-- 🔄 npm package for easy installation
+- 🔄 npm/pip distribution
+- 🔄 Screenshots & GIF demos
+
+> **Maturity**: this is a single-user production prototype. The author runs it daily. It is not yet hardened for multi-user / multi-tenant deployments.
 
 ---
 
 ## License
 
-BSL-1.1
+[MIT](LICENSE) — Copyright (c) 2026 Hirokazu Seto
