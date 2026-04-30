@@ -126,7 +126,7 @@ def _ollama_score(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             data = json.loads(resp.read().decode())
             return _parse_float(data.get("response", ""))
     except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
@@ -137,7 +137,7 @@ def _ollama_score(
 
 def _ollama_available(endpoint: str = "http://127.0.0.1:11434") -> bool:
     try:
-        with urllib.request.urlopen(f"{endpoint}/api/tags", timeout=2.0):
+        with urllib.request.urlopen(f"{endpoint}/api/tags", timeout=2.0):  # nosec B310
             return True
     except OSError:
         return False

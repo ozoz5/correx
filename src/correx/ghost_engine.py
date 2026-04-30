@@ -473,7 +473,7 @@ def _sublimate_with_llm(
         model = "qwen2.5:7b"
         try:
             tags_req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
-            with urllib.request.urlopen(tags_req, timeout=3) as tags_resp:
+            with urllib.request.urlopen(tags_req, timeout=3) as tags_resp:  # nosec B310
                 tags = _json.loads(tags_resp.read())
                 available = [m["name"] for m in tags.get("models", [])]
                 if not available:
@@ -494,7 +494,7 @@ def _sublimate_with_llm(
             data=body,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15) as resp:  # nosec B310
             result = _json.loads(resp.read())
         raw = result.get("response", "").strip()
         # Clean up: take first line, strip quotes

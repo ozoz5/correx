@@ -285,13 +285,13 @@ class AutonomousEngine:
 
         # Stochastic resonance: add one random tag from existing rules
         # ~20% of the time to broaden the search
-        if tags and random.random() < 0.2:
+        if tags and random.random() < 0.2:  # nosec B311
             all_rule_tags = [
                 t for r in layers["rules"]
                 for t in r.get("tags", [])
             ]
             if all_rule_tags:
-                noise_tag = random.choice(all_rule_tags)
+                noise_tag = random.choice(all_rule_tags)  # nosec B311
                 tags = tags | {noise_tag}
                 self._state.setdefault("stochastic_injections", 0)
                 self._state["stochastic_injections"] += 1

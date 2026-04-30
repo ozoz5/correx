@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-import subprocess
+import subprocess  # nosec B404
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,7 +92,7 @@ def build_test_command(
 
 
 def run_command(command: list[str], *, cwd: str | Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return subprocess.run(  # nosec B603
         command,
         cwd=str(cwd) if cwd else None,
         check=True,

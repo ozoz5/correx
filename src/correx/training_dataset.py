@@ -97,7 +97,7 @@ def _split_records(
     if split_strategy == "random":
         import random
 
-        random.Random(shuffle_seed).shuffle(ordered)
+        random.Random(shuffle_seed).shuffle(ordered)  # nosec B311
     total = len(ordered)
     if total < 5:
         return ordered, [], []

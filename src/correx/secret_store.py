@@ -1,5 +1,5 @@
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 
 SERVICE_NAME = "correx"
@@ -14,7 +14,7 @@ def get_secure_secret(account_name):
         return None
 
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B607
             [
                 "security",
                 "find-generic-password",
@@ -39,7 +39,7 @@ def set_secure_secret(account_name, secret_value):
         return False
 
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B607
             [
                 "security",
                 "add-generic-password",
@@ -65,7 +65,7 @@ def delete_secure_secret(account_name):
         return False
 
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B607
             [
                 "security",
                 "delete-generic-password",
