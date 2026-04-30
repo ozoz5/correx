@@ -530,6 +530,31 @@ class HistoryStore:
             last_seen_at=str(item.get("last_seen_at", "")).strip(),
         )
 
+    def _ensure_latent_contexts(self, rule: PreferenceRule) -> PreferenceRule:
+        """Lazy migration: legacy rules without latent_contexts get inferred ones.
+
+        Separated from _normalize_rule to make the read path explicit:
+        - _normalize_rule() = pure dict -> dataclass conversion
+        - _ensure_latent_contexts() = legacy data migration with side effect
+
+        Reviewer note (external code review): the previous inline migration
+        at the end of _normalize_rule mixed pure conversion with stateful
+        inference, making the persistence layer's "read = no side effect"
+        contract implicit.
+        """
+        if rule.latent_contexts:
+            return rule
+        rule.latent_contexts = infer_latent_contexts_from_rule(rule)
+        if rule.latent_contexts:
+            rule.contexts = flatten_latent_contexts(rule.latent_contexts)
+            rule.distinct_scope_count = len(
+                [c for c in rule.contexts if c.kind == "scope"]
+            )
+            rule.distinct_tag_count = len(
+                [c for c in rule.contexts if c.kind == "tag"]
+            )
+        return rule
+
     def _normalize_rule(self, item: dict) -> PreferenceRule:
         tags = [str(entry).strip() for entry in item.get("tags", []) if str(entry).strip()]
         applies_to_scope = str(item.get("applies_to_scope", "")).strip()
@@ -704,13 +729,7 @@ class HistoryStore:
             distinct_scope_count=distinct_scope_count,
             distinct_tag_count=distinct_tag_count,
         )
-        if not rule.latent_contexts:
-            rule.latent_contexts = infer_latent_contexts_from_rule(rule)
-            if rule.latent_contexts:
-                rule.contexts = flatten_latent_contexts(rule.latent_contexts)
-                rule.distinct_scope_count = len([context for context in rule.contexts if context.kind == "scope"])
-                rule.distinct_tag_count = len([context for context in rule.contexts if context.kind == "tag"])
-        return rule
+        return self._ensure_latent_contexts(rule)
 
     def _get_active_profile(self) -> str:
         """Read active profile from profiles.json."""

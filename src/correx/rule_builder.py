@@ -33,6 +33,71 @@ from .schemas import (
 )
 
 
+def _build_latent_context_from_dict(context: dict) -> LatentContext:
+    """Convert raw context dict -> LatentContext, computing derived metrics once.
+
+    Previously inlined in build_preference_rules with derive_*() called 4x for
+    confidence_score and 2x for expected_gain due to nested derive_*() calls
+    inside derive_latent_context_prior_weight. This helper computes each metric
+    exactly once and reuses the value.
+    """
+    ec = float(context.get("evidence_count", 0.0) or 0.0)
+    ss = float(context.get("support_score", 0.0) or 0.0)
+    pm = float(context.get("posterior_mass", 0.0) or 0.0)
+    sc = float(context.get("strong_signal_count", 0.0) or 0.0)
+    sm = float(context.get("success_mass", 0.0) or 0.0)
+    fm = float(context.get("failure_mass", 0.0) or 0.0)
+
+    confidence = derive_latent_context_confidence_score(
+        evidence_count=ec,
+        support_score=ss,
+        posterior_mass=pm,
+        strong_signal_count=sc,
+        success_mass=sm,
+        failure_mass=fm,
+    )
+    gain = derive_latent_context_expected_gain(
+        support_score=ss,
+        confidence_score=confidence,
+        strong_signal_count=sc,
+        success_mass=sm,
+        failure_mass=fm,
+    )
+    prior = derive_latent_context_prior_weight(
+        evidence_count=ec,
+        support_score=ss,
+        expected_gain=gain,
+        confidence_score=confidence,
+        posterior_mass=pm,
+    )
+
+    return LatentContext(
+        id=str(context.get("id", "")),
+        scope=str(context.get("scope", "")).strip(),
+        tags=[
+            str(entry).strip()
+            for entry in context.get("tags", [])
+            if str(entry).strip()
+        ],
+        keywords=[
+            str(entry).strip()
+            for entry in context.get("keywords", [])
+            if str(entry).strip()
+        ],
+        prototype_text=str(context.get("prototype_text", "")).strip(),
+        evidence_count=ec,
+        support_score=ss,
+        expected_gain=gain,
+        confidence_score=confidence,
+        prior_weight=prior,
+        posterior_mass=pm,
+        strong_signal_count=sc,
+        success_mass=sm,
+        failure_mass=fm,
+        last_seen_at=str(context.get("last_seen_at", "")),
+    )
+
+
 def build_preference_rules(
     turns: list[ConversationTurn],
     min_promoted_evidence: int = 1,
@@ -229,77 +294,7 @@ def build_preference_rules(
         applies_when_tags = [tag for tag, _ in tag_counter.most_common(12)]
         latent_contexts = merge_latent_contexts(
             [
-                LatentContext(
-                    id=str(context.get("id", "")),
-                    scope=str(context.get("scope", "")).strip(),
-                    tags=[
-                        str(entry).strip()
-                        for entry in context.get("tags", [])
-                        if str(entry).strip()
-                    ],
-                    keywords=[
-                        str(entry).strip()
-                        for entry in context.get("keywords", [])
-                        if str(entry).strip()
-                    ],
-                    prototype_text=str(context.get("prototype_text", "")).strip(),
-                    evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                    support_score=float(context.get("support_score", 0.0) or 0.0),
-                    expected_gain=derive_latent_context_expected_gain(
-                        support_score=float(context.get("support_score", 0.0) or 0.0),
-                        confidence_score=derive_latent_context_confidence_score(
-                            evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                            support_score=float(context.get("support_score", 0.0) or 0.0),
-                            posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                            strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                            success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                            failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                        ),
-                        strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                        success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                        failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                    ),
-                    confidence_score=derive_latent_context_confidence_score(
-                        evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                        support_score=float(context.get("support_score", 0.0) or 0.0),
-                        posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                        strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                        success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                        failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                    ),
-                    prior_weight=derive_latent_context_prior_weight(
-                        evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                        support_score=float(context.get("support_score", 0.0) or 0.0),
-                        expected_gain=derive_latent_context_expected_gain(
-                            support_score=float(context.get("support_score", 0.0) or 0.0),
-                            confidence_score=derive_latent_context_confidence_score(
-                                evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                                support_score=float(context.get("support_score", 0.0) or 0.0),
-                                posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                                strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                                success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                                failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                            ),
-                            strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                            success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                            failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                        ),
-                        confidence_score=derive_latent_context_confidence_score(
-                            evidence_count=float(context.get("evidence_count", 0.0) or 0.0),
-                            support_score=float(context.get("support_score", 0.0) or 0.0),
-                            posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                            strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                            success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                            failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                        ),
-                        posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                    ),
-                    posterior_mass=float(context.get("posterior_mass", 0.0) or 0.0),
-                    strong_signal_count=float(context.get("strong_signal_count", 0.0) or 0.0),
-                    success_mass=float(context.get("success_mass", 0.0) or 0.0),
-                    failure_mass=float(context.get("failure_mass", 0.0) or 0.0),
-                    last_seen_at=str(context.get("last_seen_at", "")),
-                )
+                _build_latent_context_from_dict(context)
                 for context in bucket["latent_context_map"].values()
             ]
         )
