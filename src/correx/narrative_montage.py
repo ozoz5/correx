@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
 
 from .schemas import Policy, Tension
 
@@ -63,7 +62,7 @@ def compute_policy_fingerprint(policies: list[Policy]) -> str:
     )
     parts = [f"{p.id}:{p.evidence_count // 10}" for p in active]
     raw = "|".join(parts)
-    return hashlib.md5(raw.encode()).hexdigest()[:12]
+    return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def needs_regeneration(current_fp: str, stored: NarrativeState | None) -> bool:

@@ -13,7 +13,6 @@ Implements a brain-like memory hierarchy:
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -175,7 +174,6 @@ def archive_turns_to_episode(
 # 2. Rule Compression — merge similar rules
 # ---------------------------------------------------------------------------
 
-from .text_similarity import char_ngrams as _char_ngrams  # noqa: E402
 from .text_similarity import ngram_jaccard as _ngram_similarity  # noqa: E402
 
 
@@ -962,7 +960,7 @@ def infer_latent_context_responsibilities(
     if not latent_contexts:
         return [], 1.0
 
-    raw_scope = task_scope.strip()
+    task_scope.strip()
     normalized_scope = normalize_text(task_scope)
     normalized_tags = {
         normalize_text(tag)
@@ -1140,7 +1138,6 @@ def merge_similar_rules(
         all_tags = set()
         all_source_ids = []
         all_when_tags = set()
-        all_contexts: list[RuleContext] = []
         all_latent_contexts: list[LatentContext] = []
         earliest = primary.first_recorded_at
         latest = primary.last_recorded_at

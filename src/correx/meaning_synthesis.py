@@ -13,7 +13,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .memory_manager import _char_ngrams, _ngram_similarity
+from .memory_manager import _ngram_similarity
 from .schemas import Meaning, Principle, PreferenceRule
 
 

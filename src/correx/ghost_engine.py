@@ -33,8 +33,6 @@ import math
 import re
 from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
 
 from .schemas import Ghost, GhostTrajectory
 
@@ -103,7 +101,6 @@ def origin_weight(origin: str) -> float:
 # ---------------------------------------------------------------------------
 
 from .text_similarity import char_ngrams as _ts_char_ngrams  # noqa: E402
-from .text_similarity import ngram_jaccard  # noqa: E402
 
 
 def _char_ngrams(text: str, n: int = 3) -> set[str]:

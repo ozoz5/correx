@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -22,8 +21,6 @@ except ImportError:  # pragma: no cover - unavailable on POSIX
 from .conversation_learning import (
     extract_correction_candidates,
     extract_keywords,
-    is_explicit_directive,
-    normalize_correction_statement,
     normalize_text,
 )
 from .memory_manager import (
@@ -31,16 +28,11 @@ from .memory_manager import (
     build_context_signature,
     derive_context_confidence_score,
     derive_context_mode,
-    derive_latent_context_confidence_score,
-    derive_latent_context_expected_gain,
-    derive_latent_context_prior_weight,
     derive_rule_confidence_score,
     derive_rule_expected_gain,
-    derive_rule_status,
     derive_transition_confidence_score,
     derive_transition_forecast_score,
     evict_episodes,
-    evict_turns,
     flatten_latent_contexts,
     infer_latent_contexts_from_rule,
     merge_rule_contexts,

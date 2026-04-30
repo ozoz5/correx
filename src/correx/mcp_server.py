@@ -1431,7 +1431,6 @@ def create_mcp_server(
         """
         import re
         import hashlib
-        from datetime import datetime
 
         base = Path(projects_dir) if projects_dir else Path.home() / ".claude" / "projects"
         if not base.exists():
@@ -1450,7 +1449,8 @@ def create_mcp_server(
         def _infer_scope(name: str) -> str:
             """Infer task scope from Claude project directory name."""
             n = name.lower()
-            if "document" in n: return "document_creation"
+            if "document" in n:
+                return "document_creation"
             return "general"
 
         # Load existing to avoid duplicates
@@ -1530,7 +1530,6 @@ def create_mcp_server(
                         continue
                     existing_ids.add(turn_id)
 
-                    score = 0.25 if is_negative else 0.85
                     tags = [scope, "ingested"]
                     if is_positive:
                         tags.append("positive")

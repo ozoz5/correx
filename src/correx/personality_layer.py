@@ -346,7 +346,7 @@ def detect_interventions(
                 pattern_type="stale_retention",
                 confidence=min(0.9, 0.4 + failure_count * 0.1),
                 evidence=f"Rule '{rule.instruction[:40]}' failed {failure_count}x vs {success_count} successes",
-                mirror_prompt=f"This rule has been failing more than succeeding recently. Is it still relevant to what you're doing now?",
+                mirror_prompt="This rule has been failing more than succeeding recently. Is it still relevant to what you're doing now?",
                 reward_frame="Retiring outdated rules makes the remaining ones more precise",
             ))
 

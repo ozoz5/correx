@@ -55,7 +55,8 @@ def _now_str() -> str:
 
 def _make_id(seed: str) -> str:
     h = hashlib.md5(
-        f"{seed}-{datetime.now(timezone.utc).isoformat()}".encode()
+        f"{seed}-{datetime.now(timezone.utc).isoformat()}".encode(),
+        usedforsecurity=False,
     ).hexdigest()
     return h[:16]
 

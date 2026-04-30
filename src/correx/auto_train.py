@@ -13,7 +13,7 @@ from .mlx_trainer import (
     run_command,
 )
 from .schemas import EpisodeRecord
-from .training_dataset import DatasetExportReport, export_mlx_lm_dataset
+from .training_dataset import export_mlx_lm_dataset
 
 
 @dataclass(slots=True)

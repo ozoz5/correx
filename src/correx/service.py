@@ -48,7 +48,6 @@ from .curiosity_engine import (
     create_signal,
     process_curiosity_signal,
     resolve_cluster,
-    signal_from_dict,
     signal_to_dict,
 )
 from .ghost_engine import (
@@ -1125,7 +1124,6 @@ class CorrexService:
         patterns, so they survive the cut. Positive laws, the application
         rule block, and individual sublimated principles are untouched.
         """
-        import json as _json
 
         sections: list[str] = []
 
@@ -2094,7 +2092,6 @@ class CorrexService:
         Stage 2: Check if the universal principle fits an existing law or creates a new one
         Then re-evaluate dormant rules under the updated laws.
         """
-        import json as _json
         import os
 
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -2139,7 +2136,7 @@ class CorrexService:
         laws = self.history.load_ghost_universal_laws()
 
         if laws:
-            law_list = "\n".join(f"{i+1}. {l.get('law', '')}" for i, l in enumerate(laws))
+            law_list = "\n".join(f"{i+1}. {law.get('law', '')}" for i, law in enumerate(laws))
             try:
                 r2 = client.messages.create(
                     model="claude-sonnet-4-20250514",
@@ -2277,7 +2274,6 @@ class CorrexService:
             universal_law: Optional universal law generalized from principle.
             law_match_index: If > 0, absorb into existing law at this index (1-based).
         """
-        import json as _json
 
         trajectories = self.history.load_ghost_trajectories()
         updated = False

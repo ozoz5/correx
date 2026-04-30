@@ -5,8 +5,6 @@ import math
 from .conversation_learning import extract_keywords, normalize_text
 from .memory_manager import (
     build_context_signature,
-    find_relevant_rules_semantic,
-    find_relevant_turns_semantic,
     infer_latent_context_responsibilities,
     infer_latent_contexts_from_rule,
 )
