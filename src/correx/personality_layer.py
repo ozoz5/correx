@@ -89,6 +89,13 @@ def _estimate_metabolism(
     if not rules:
         return 0.5, "balanced"
 
+    # Small-sample guard: with <5 rules, a single demote pushes attack_score
+    # to 0.2-0.5 and falsely classifies the user as "aggressive".
+    # service.compute_personality_profile() applies the same guard at the
+    # caller level; this duplicates it here so direct callers are also safe.
+    if len(rules) < 5:
+        return 0.5, "balanced"
+
     # Attack indicators
     demoted_count = sum(1 for r in rules if r.status == "demoted")
     conflict_demoted = sum(1 for r in rules if "conflict_demoted" in (r.tags or []))
