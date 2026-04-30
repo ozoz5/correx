@@ -247,6 +247,7 @@ def create_mcp_server(
         company_profile: dict | None = None,
         limit: int = 3,
         return_trace: bool = False,
+        verbose: bool = False,
     ) -> dict[str, Any]:
         """Use this when you want reusable human correction memory for a new task prompt.
 
@@ -257,6 +258,13 @@ def create_mcp_server(
         ``save_conversation_turn(metadata={"inference_trace": {...}})`` to
         close the Organic Loop. Default ``False`` preserves the legacy
         two-field response.
+
+        ``verbose`` controls payload size (default ``False`` = Medium diet):
+        drops policy ``analogy``, caps prohibition laws at top 15 by coverage,
+        and slims rule entries inside ``inference_trace`` (clears ``reason``,
+        caps tag/keyword lists at 3, collapses ``latent_context_matches`` to
+        a ``{count, max_posterior}`` summary). Set ``verbose=True`` when you
+        need the full payload for dashboard inspection or deep debugging.
         """
         result = service.build_guidance_context(
             company_profile=company_profile,
@@ -266,6 +274,7 @@ def create_mcp_server(
             limit=limit,
             task_scope=task_scope,
             return_trace=return_trace,
+            verbose=verbose,
         )
         if return_trace and isinstance(result, dict):
             guidance = result.get("guidance_context", "")

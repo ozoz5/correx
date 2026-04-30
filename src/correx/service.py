@@ -181,6 +181,46 @@ def _evaluate_transition_forecast(
     }
 
 
+def _slim_rule_entry(entry: dict) -> dict:
+    """Trim a rule entry inside ``inference_trace`` for Medium-mode payload.
+
+    Preserves decision-critical fields (``rule_id``, ``statement``, scores,
+    ``selected_for_guidance``) intact. Strips verbose reasoning traces:
+    ``reason`` is cleared; ``applies_when_tags`` / ``top_context_keywords`` /
+    ``top_context_tags`` are capped at 3; ``latent_context_matches`` is
+    collapsed to a ``{count, max_posterior}`` summary.
+
+    Only applied when ``build_guidance_context(verbose=False)``. The full
+    entry is preserved in ``verbose=True`` mode.
+    """
+    if not isinstance(entry, dict):
+        return entry
+    slimmed = dict(entry)
+    slimmed["reason"] = ""
+    for key in ("applies_when_tags", "top_context_keywords", "top_context_tags"):
+        value = slimmed.get(key)
+        if isinstance(value, list):
+            slimmed[key] = value[:3]
+    matches = slimmed.get("latent_context_matches")
+    if isinstance(matches, list):
+        if matches:
+            posteriors = [
+                float(m.get("posterior", 0.0) or 0.0)
+                for m in matches
+                if isinstance(m, dict)
+            ]
+            slimmed["latent_context_matches"] = {
+                "count": len(matches),
+                "max_posterior": round(max(posteriors, default=0.0), 4),
+            }
+        else:
+            slimmed["latent_context_matches"] = {
+                "count": 0,
+                "max_posterior": 0.0,
+            }
+    return slimmed
+
+
 class CorrexService:
     def __init__(
         self,
@@ -625,13 +665,11 @@ class CorrexService:
         task_scope: str = "",
         previous_context_nodes: list[dict] | None = None,
         return_trace: bool = False,
+        verbose: bool = False,
     ):
         """Build layered guidance text, optionally with an inference trace.
 
-        When ``return_trace=False`` (default), returns the legacy string so
-        existing callers (direct MCP tools, chat_adapter, CLAUDE.md workflows)
-        are not affected.
-
+        When ``return_trace=False`` (default), returns the guidance string.
         When ``return_trace=True``, returns a dict with:
             - ``guidance_context``: the same string the legacy path returns
             - ``inference_trace``: same schema as chat_adapter.prepare produces
@@ -641,6 +679,20 @@ class CorrexService:
             - ``guidance_id``: UUID generated per preflight call, not per turn
               (a turn may reference a guidance_id or none; a guidance_id may
               be referenced by zero or one turn)
+
+        ``verbose`` controls payload size (added 2026-04-25):
+            - ``verbose=False`` (default, "Medium" diet): trims the returned
+              payload for routine use. Policy sections drop ``analogy``
+              (core / why / opposite / limits remain). Ghost prohibition laws
+              are capped to the top 15 by coverage. Rule entries inside
+              ``inference_trace.selected_rules`` / ``abstained_rules`` are
+              slimmed via ``_slim_rule_entry`` (``reason`` cleared,
+              ``applies_when_tags`` / ``top_context_keywords`` /
+              ``top_context_tags`` capped at 3, ``latent_context_matches``
+              collapsed to ``{count, max_posterior}``). Target ~3x smaller JSON.
+            - ``verbose=True``: full legacy payload, identical to the
+              pre-diet shape. Use when you need ``analogy`` or full rule
+              reasoning traces (dashboard inspection, deep debugging).
 
         ``selected_meaning_ids`` and ``selected_principle_ids`` are returned
         as empty lists for now; extracting them from the meaning/principle
@@ -681,12 +733,12 @@ class CorrexService:
             sections.append(personality_section)
 
         # Policy layer: deep interpretable principles (highest priority)
-        policy_section = self._build_policy_guidance()
+        policy_section = self._build_policy_guidance(verbose=verbose)
         if policy_section:
             sections.append(policy_section)
 
         # Ghost layer: sublimated principles from rejected proposals
-        ghost_section = self._build_ghost_guidance()
+        ghost_section = self._build_ghost_guidance(verbose=verbose)
         if ghost_section:
             sections.append(ghost_section)
 
@@ -746,8 +798,16 @@ class CorrexService:
                 for item in analysis["abstained_rules"]
                 if item.get("rule_id")
             ],
-            "selected_rules": analysis["selected_rules"],
-            "abstained_rules": analysis["abstained_rules"],
+            "selected_rules": (
+                analysis["selected_rules"]
+                if verbose
+                else [_slim_rule_entry(e) for e in analysis["selected_rules"]]
+            ),
+            "abstained_rules": (
+                analysis["abstained_rules"]
+                if verbose
+                else [_slim_rule_entry(e) for e in analysis["abstained_rules"]]
+            ),
             # Phase 1.1: harvest IDs from meaning/principle layers of the
             # conversation guidance builder. For now, record empty lists so
             # downstream consumers (simulate_benchmark.py) can rely on the
@@ -1049,12 +1109,21 @@ class CorrexService:
             return ""
         return format_personality_guidance(profile, interventions)
 
-    def _build_ghost_guidance(self) -> str:
+    def _build_ghost_guidance(
+        self, *, verbose: bool = True, prohibition_top_k: int = 15
+    ) -> str:
         """Build guidance from Ghost Engine: universal laws + sublimated principles.
 
         Universal laws are the highest-level behavioral principles, distilled
         from hundreds of rejections via Claude Sonnet. They take precedence
         over individual sublimated principles.
+
+        ``verbose=False`` caps the prohibition law list to ``prohibition_top_k``
+        laws with the largest ``covers`` (evidence breadth). The full list is
+        frequently 60+ entries and floods the prompt without proportional
+        signal gain — high-``len(covers)`` laws represent the most-supported
+        patterns, so they survive the cut. Positive laws, the application
+        rule block, and individual sublimated principles are untouched.
         """
         import json as _json
 
@@ -1066,8 +1135,18 @@ class CorrexService:
         # 1. Universal laws (constraints)
         laws = self.history.load_ghost_universal_laws()
         if laws:
+            displayed_laws = laws
+            if not verbose and prohibition_top_k > 0 and len(laws) > prohibition_top_k:
+                def _cover_count(item: object) -> int:
+                    if isinstance(item, dict):
+                        covers = item.get("covers") or []
+                        return len(covers) if isinstance(covers, list) else 0
+                    return 0
+                displayed_laws = sorted(
+                    laws, key=_cover_count, reverse=True
+                )[:prohibition_top_k]
             law_lines = ["[禁止法理 — 却下パターンから昇華された行動制約]"]
-            for i, law in enumerate(laws, 1):
+            for i, law in enumerate(displayed_laws, 1):
                 text = law.get("law", "") if isinstance(law, dict) else str(law)
                 if text:
                     law_lines.append(f"  {i}. {text}")
@@ -1604,12 +1683,17 @@ class CorrexService:
             avoidance_keywords=profile.get("avoidance_keywords", []),
         )
 
-    def _build_policy_guidance(self) -> str:
+    def _build_policy_guidance(self, *, verbose: bool = True) -> str:
         """Build guidance from active policies for injection into context.
 
         Policies are the highest-quality knowledge unit. They carry
         core, why, analogy, opposite, and limits — enabling reasoning
         in novel situations rather than literal rule-following.
+
+        ``verbose=False`` omits ``analogy`` to reduce payload size for
+        routine calls. ``core / why / opposite / limits`` are preserved
+        because they carry the judgment boundaries — analogy is
+        decorative prose that costs tokens without steering behavior.
         """
         policies = self.history.load_policies()
         active = [p for p in policies if p.maturity == "active"]
@@ -1621,7 +1705,7 @@ class CorrexService:
             lines.append(f"核: {p.core}")
             if p.why:
                 lines.append(f"なぜ: {p.why}")
-            if p.analogy:
+            if verbose and p.analogy:
                 lines.append(f"類推: {p.analogy}")
             if p.opposite:
                 lines.append(f"反対: {p.opposite}")
