@@ -479,20 +479,22 @@ def build_guidance_context(
         return ""
 
     lines = [
-        "# HUMAN CORRECTION MEMORY",
-        "Use these notes only as strategic guidance. Do not treat them as facts about the current task.",
+        "# CORRECTION HISTORY",
+        "The user made these corrections in similar past tasks. Apply them.",
     ]
     for item in relevant:
         latest = item["latest"]
-        lines.extend(
-            [
-                f"## Previous case: {item['title']} / {item['issuer']}",
-                f"- Why relevant: {item['reason']}",
-                f"- Actual override: {latest.get('decision_override') or 'No override recorded'}",
-                f"- Human correction: {latest.get('correction_note') or 'No correction note'}",
-                f"- Reuse guidance: {latest.get('reuse_note') or 'No reuse guidance'}",
-            ]
-        )
+        correction = latest.get("correction_note") or ""
+        reuse = latest.get("reuse_note") or ""
+        override = latest.get("decision_override") or ""
+        if correction or reuse or override:
+            lines.append(f"## {item['title']}")
+            if override:
+                lines.append(f"- Override: {override}")
+            if correction:
+                lines.append(f"- {correction}")
+            if reuse:
+                lines.append(f"- {reuse}")
     return "\n".join(lines)
 
 
@@ -530,51 +532,71 @@ def build_conversation_guidance(
     if not selected_rules and not relevant_turns:
         return ""
 
+    # Classify rules by authority level:
+    # MANDATORY: strong_signal (explicit directive or strong rejection) OR promoted with evidence >= 2
+    # STRONG: promoted with evidence == 1
+    # PREFERENCE: candidate rules
+    mandatory: list[dict] = []
+    strong: list[dict] = []
+    preference: list[dict] = []
+    for item in selected_rules:
+        if item.get("strong_signal_count", 0) >= 1 or (
+            item.get("status") == "promoted" and item.get("evidence_count", 0) >= 2
+        ):
+            mandatory.append(item)
+        elif item.get("status") == "promoted":
+            strong.append(item)
+        else:
+            preference.append(item)
+
     lines = [
-        "# USER PREFERENCE MEMORY",
-        "Use these as stylistic and structural guidance. They are not facts about the current task.",
+        "# USER CORRECTION RULES",
+        "These rules were extracted from the user's explicit corrections. Follow them.",
     ]
 
-    if selected_rules:
-        lines.append("## Contextual rules")
-        for item in selected_rules:
-            qualifiers: list[str] = []
-            if item.get("applies_to_scope"):
-                qualifiers.append(f"scope={item['applies_to_scope']}")
-            if item.get("applies_when_tags"):
-                qualifiers.append("tags=" + "/".join(item["applies_when_tags"][:4]))
+    if mandatory:
+        lines.append("")
+        lines.append("## MANDATORY — The user explicitly requires this. Always follow.")
+        for item in mandatory:
+            instruction = item.get("instruction") or item["statement"]
+            line = f"- {instruction}"
             if item.get("negative_conditions"):
-                qualifiers.append("avoid=" + " / ".join(item["negative_conditions"][:2]))
-            if item.get("context_mode"):
-                qualifiers.append(f"mode={item['context_mode']}")
-            if item.get("latent_context_count"):
-                qualifiers.append(f"latent={item['latent_context_count']}")
-            if item.get("top_context_scope"):
-                qualifiers.append(f"top={item['top_context_scope']}")
-            lines.append(
-                f"- {item['statement']} (reason: {item['reason']}; gain: {item['expected_gain']:.1f}; confidence: {item['confidence_score']:.2f}; evidence: {item['evidence_count']}; {'; '.join(qualifiers) if qualifiers else 'general'})"
-            )
+                line += f" (except: {' / '.join(item['negative_conditions'][:2])})"
+            lines.append(line)
+
+    if strong:
+        lines.append("")
+        lines.append("## STRONG — Follow unless clearly inapplicable to this task.")
+        for item in strong:
+            instruction = item.get("instruction") or item["statement"]
+            line = f"- {instruction}"
+            if item.get("negative_conditions"):
+                line += f" (except: {' / '.join(item['negative_conditions'][:2])})"
+            lines.append(line)
+
+    if preference:
+        lines.append("")
+        lines.append("## PREFERENCE — Apply when relevant.")
+        for item in preference:
+            instruction = item.get("instruction") or item["statement"]
+            lines.append(f"- {instruction}")
 
     if relevant_turns:
-        lines.append("## Recent conversation corrections")
+        lines.append("")
+        lines.append("## Recent corrections from user")
         for item in relevant_turns:
-            lines.append(f"- Scope: {item['task_scope'] or 'generic'} ({item['reason']})")
             for correction in item["extracted_corrections"][:2]:
-                lines.append(f"  - {correction}")
+                lines.append(f"- {correction}")
 
-    # Inject meanings (emergent value principles)
     if meanings:
         top_meanings = sorted(
             [m for m in meanings if getattr(m, "status", "") == "active"],
             key=lambda m: (-getattr(m, "strength", 0), -getattr(m, "cross_scope_count", 0)),
         )[:3]
         if top_meanings:
-            lines.append("## Value Principles (emergent from multiple rules)")
+            lines.append("")
+            lines.append("## Principles — Patterns confirmed across multiple tasks.")
             for m in top_meanings:
-                scopes_str = "/".join(getattr(m, "scopes", [])[:3])
-                lines.append(
-                    f"- {getattr(m, 'principle', '')} "
-                    f"(strength: {getattr(m, 'strength', 0)}, scopes: {scopes_str})"
-                )
+                lines.append(f"- {getattr(m, 'principle', '')}")
 
     return "\n".join(lines)

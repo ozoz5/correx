@@ -346,7 +346,8 @@ class CorrexServiceTest(unittest.TestCase):
                 raw_text="システム 移行 運用保守",
             )
 
-            self.assertEqual(1, guidance.count("## Previous case:"))
+            self.assertIn("CORRECTION HISTORY", guidance)
+            self.assertEqual(1, guidance.count("## 自治体システム再構築業務"))
 
     def test_memory_summary_counts_training_examples(self):
         with TemporaryDirectory() as temp_dir:
@@ -679,7 +680,7 @@ class CorrexServiceTest(unittest.TestCase):
                 task_scope="service design",
             )
 
-            self.assertIn("USER PREFERENCE MEMORY", guidance)
+            self.assertIn("USER CORRECTION RULES", guidance)
             self.assertIn("余白を作れ", guidance)
             self.assertIn("情報量が多すぎる", guidance)
 
