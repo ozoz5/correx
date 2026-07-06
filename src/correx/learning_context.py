@@ -495,6 +495,28 @@ def build_guidance_context(
     return "\n".join(lines)
 
 
+def _precedent_line(rule, turn_by_id: dict) -> str:
+    """ルールの誕生判例を1行返す — 最新のsource turnの実発言を添える。
+
+    「テストを書け」という命令より「6/30にお前は『ややこしくてわからん』と
+    言われた」という記憶の方が行動を変える (d=0.78, [痕跡]の実効実績)。
+    """
+    if rule is None:
+        return ""
+    src_ids = list(getattr(rule, "source_turn_ids", []) or [])
+    for tid in reversed(src_ids):
+        turn = turn_by_id.get(tid)
+        if turn is None:
+            continue
+        feedback = (
+            getattr(turn, "user_feedback", "") or getattr(turn, "user_message", "") or ""
+        ).strip().replace("\n", " ")
+        if feedback:
+            date = str(getattr(turn, "recorded_at", ""))[:10]
+            return f"  判例: {date}「{feedback[:80]}」"
+    return ""
+
+
 def build_conversation_guidance(
     turns: list[ConversationTurn],
     rules: list[PreferenceRule],
@@ -516,8 +538,10 @@ def build_conversation_guidance(
         transitions=transitions,
     )
     # Both promoted and candidate rules are capped to avoid context flooding.
+    # Whitelist statuses explicitly: "!= promoted" also let demoted rules
+    # (failure-demoted, 120/127 in production 2026-07) re-enter guidance.
     promoted_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") == "promoted"][:rule_limit]
-    candidate_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") != "promoted"][:rule_limit]
+    candidate_rules = [item for item in relevant_rules if item.get("selected_for_guidance", False) and item.get("status") == "candidate"][:rule_limit]
     selected_rules = promoted_rules + candidate_rules
     relevant_turns = get_relevant_conversation_corrections(
         turns,
@@ -535,24 +559,27 @@ def build_conversation_guidance(
     ]
 
     if selected_rules:
+        # 判例つき注入 (2026-07-06 ナラティブ原理): テレメトリ (reason/gain/
+        # confidence…) は skim される実証があるため既定で出さない。代わりに
+        # ルールの誕生判例 — そのルールを生んだ実際のユーザー発言 — を1行
+        # 添える。法律は判例つきで渡すと読まれる。数値はinference_trace側に
+        # 生きているので測定は失わない。
+        stmt_to_rule = {getattr(r, "statement", ""): r for r in rules}
+        turn_by_id = {getattr(t, "id", ""): t for t in turns}
         lines.append("## Contextual rules")
         for item in selected_rules:
             qualifiers: list[str] = []
             if item.get("applies_to_scope"):
                 qualifiers.append(f"scope={item['applies_to_scope']}")
-            if item.get("applies_when_tags"):
-                qualifiers.append("tags=" + "/".join(item["applies_when_tags"][:4]))
             if item.get("negative_conditions"):
                 qualifiers.append("avoid=" + " / ".join(item["negative_conditions"][:2]))
-            if item.get("context_mode"):
-                qualifiers.append(f"mode={item['context_mode']}")
-            if item.get("latent_context_count"):
-                qualifiers.append(f"latent={item['latent_context_count']}")
-            if item.get("top_context_scope"):
-                qualifiers.append(f"top={item['top_context_scope']}")
-            lines.append(
-                f"- {item['statement']} (reason: {item['reason']}; gain: {item['expected_gain']:.1f}; confidence: {item['confidence_score']:.2f}; evidence: {item['evidence_count']}; {'; '.join(qualifiers) if qualifiers else 'general'})"
+            suffix = f"（{'; '.join(qualifiers)}）" if qualifiers else ""
+            lines.append(f"- {item['statement']}{suffix}")
+            precedent = _precedent_line(
+                stmt_to_rule.get(item.get("statement", "")), turn_by_id
             )
+            if precedent:
+                lines.append(precedent)
 
     if relevant_turns:
         lines.append("## Recent conversation corrections")
