@@ -7,6 +7,7 @@ Usage:
     python scripts/maintenance.py --rotate-log-only
     python scripts/maintenance.py --prune-bak-only
     python scripts/maintenance.py --prune-dir-only
+    python scripts/maintenance.py --prune-session-state-only
 
 Complements scripts/cleanup_overfitting.py (which handles data quality —
 rule deduplication, confidence recalc). This script handles filesystem
@@ -22,11 +23,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BASE_DIR = Path.home() / ".correx"
+GATEGUARD_DIR = Path.home() / ".gateguard"
 HOME = Path.home()
 
 # Thresholds
 GATE_LOG_ROTATE_BYTES = 1 * 1024 * 1024  # 1 MB
 BACKUP_AGE_DAYS = 30  # prune backups older than this
+SESSION_STATE_AGE_DAYS = 30  # prune GateGuard hook session-state files older than this
+
+# GateGuard's hook_state.py writes one .session_state_<id>.json/.lock pair per
+# Claude Code session with no end-of-session cleanup. Left unattended these
+# accumulate indefinitely (observed: 86 -> 190 -> 596 files/month) and caused
+# the CORREX MCP server itself to fail its 30s startup handshake in 2026-06.
+# Scans both the legacy location (~/.correx, pre-2026-07-01) and the current
+# one (~/.gateguard) so old stragglers still get cleaned up after the split.
+SESSION_STATE_DIRS = [BASE_DIR, GATEGUARD_DIR]
 
 # Patterns for generational backups (non-current)
 # .bak is considered current (most recent auto-backup), so we keep it.
@@ -191,6 +202,47 @@ def prune_backup_dirs(apply: bool = False) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# 4. Prune stale GateGuard session-state files (.session_state_*.json/.lock)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def prune_session_state_files(apply: bool = False) -> dict:
+    """Prune stale GateGuard hook session-state files.
+
+    Scans SESSION_STATE_DIRS (both the legacy ~/.correx location and the
+    current ~/.gateguard one) for .session_state_* files older than
+    SESSION_STATE_AGE_DAYS and deletes them (they are per-session gate
+    bookkeeping only — see hook_state.py DEFAULT_STATE — not durable data).
+    """
+    to_prune: list[dict] = []
+    total_bytes = 0
+    for directory in SESSION_STATE_DIRS:
+        if not directory.exists():
+            continue
+        for p in directory.glob(".session_state_*"):
+            if not p.is_file():
+                continue
+            age = age_days(p)
+            size = p.stat().st_size
+            if age >= SESSION_STATE_AGE_DAYS:
+                to_prune.append({"path": str(p), "age_days": age, "size": size})
+                total_bytes += size
+
+    action = "pruned" if apply else "would prune"
+    if apply:
+        for item in to_prune:
+            Path(item["path"]).unlink(missing_ok=True)
+
+    return {
+        "status": "ok",
+        "action": action,
+        "count": len(to_prune),
+        "total_size": human_size(total_bytes),
+        "items": to_prune,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Report formatting
 # ─────────────────────────────────────────────────────────────────────
 
@@ -199,6 +251,7 @@ def format_report(
     rotate_result: dict,
     prune_bak_result: dict,
     prune_dir_result: dict,
+    prune_session_state_result: dict,
     apply: bool,
 ) -> str:
     header = "=" * 60
@@ -244,6 +297,20 @@ def format_report(
             f"{human_size(item['size'])})"
         )
 
+    out += [
+        "",
+        "[4] Session state GC (~/.correx + ~/.gateguard .session_state_*.json/.lock)",
+        f"    {prune_session_state_result['action']}: {prune_session_state_result['count']} files, "
+        f"total {prune_session_state_result['total_size']}",
+    ]
+    for item in prune_session_state_result["items"][:10]:  # show top 10
+        out.append(
+            f"      - {item['path']} ({item['age_days']}d old, "
+            f"{human_size(item['size'])})"
+        )
+    if len(prune_session_state_result["items"]) > 10:
+        out.append(f"      ... and {len(prune_session_state_result['items']) - 10} more")
+
     out += ["", header]
     if not apply:
         out.append("Run with --apply to actually execute the above actions.")
@@ -280,13 +347,24 @@ def main():
         action="store_true",
         help="Only prune backup directories",
     )
+    parser.add_argument(
+        "--prune-session-state-only",
+        action="store_true",
+        help="Only prune stale GateGuard session-state files",
+    )
     args = parser.parse_args()
 
     # Decide which steps to run
-    any_only = args.rotate_log_only or args.prune_bak_only or args.prune_dir_only
+    any_only = (
+        args.rotate_log_only
+        or args.prune_bak_only
+        or args.prune_dir_only
+        or args.prune_session_state_only
+    )
     run_rotate = args.rotate_log_only or not any_only
     run_prune_bak = args.prune_bak_only or not any_only
     run_prune_dir = args.prune_dir_only or not any_only
+    run_prune_session_state = args.prune_session_state_only or not any_only
 
     skip_result = {
         "status": "skip",
@@ -302,8 +380,17 @@ def main():
         prune_generational_backups(apply=args.apply) if run_prune_bak else skip_result
     )
     prune_dir_result = prune_backup_dirs(apply=args.apply) if run_prune_dir else skip_result
+    prune_session_state_result = (
+        prune_session_state_files(apply=args.apply) if run_prune_session_state else skip_result
+    )
 
-    report = format_report(rotate_result, prune_bak_result, prune_dir_result, apply=args.apply)
+    report = format_report(
+        rotate_result,
+        prune_bak_result,
+        prune_dir_result,
+        prune_session_state_result,
+        apply=args.apply,
+    )
     print(report)
 
 

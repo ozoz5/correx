@@ -104,6 +104,9 @@ class PreferenceRule:
     failure_count: int = 0
     distinct_scope_count: int = 0
     distinct_tag_count: int = 0
+    # Append-only transition events ({at, from, to, reason, writer_pid});
+    # written exclusively via rule_lifecycle.transition_status().
+    status_history: list[dict] = field(default_factory=list)
 
 
 @dataclass(slots=True)

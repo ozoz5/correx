@@ -88,6 +88,7 @@ class HistoryStore:
         self.ghost_universal_laws_file = self.base_dir / "ghost_universal_laws.json"
         self.ghost_positive_laws_file = self.base_dir / "ghost_positive_laws.json"
         self.ghost_abstracted_principles_file = self.base_dir / "ghost_abstracted_principles.json"
+        self.guidance_adoption_file = self.base_dir / "guidance_adoption.json"
         self.lock_file = self.base_dir / ".store.lock"
         self._scorer = scorer  # None = rule-based only
 
@@ -720,6 +721,9 @@ class HistoryStore:
             failure_count=failure_count,
             distinct_scope_count=distinct_scope_count,
             distinct_tag_count=distinct_tag_count,
+            status_history=[
+                e for e in (item.get("status_history") or []) if isinstance(e, dict)
+            ],
         )
         return self._ensure_latent_contexts(rule)
 
@@ -1022,6 +1026,26 @@ class HistoryStore:
                     for j in journeys
                 ]
             self._atomic_write_json(self.journeys_file, journeys)
+        finally:
+            self._unlock_handle(handle)
+
+    # ── Guidance adoption persistence (Organic Loop adopt/reject) ─────────
+
+    def load_guidance_adoptions(self) -> list[dict]:
+        """Load all guidance adoption records."""
+        handle = self._lock_handle()
+        try:
+            return self._read_json_list(self.guidance_adoption_file)
+        finally:
+            self._unlock_handle(handle)
+
+    def save_guidance_adoption(self, record: dict) -> None:
+        """Append a guidance adoption record (newest first)."""
+        handle = self._lock_handle()
+        try:
+            records = self._read_json_list(self.guidance_adoption_file)
+            records.insert(0, record)
+            self._atomic_write_json(self.guidance_adoption_file, records)
         finally:
             self._unlock_handle(handle)
 

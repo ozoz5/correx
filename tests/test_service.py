@@ -713,6 +713,50 @@ class CorrexServiceTest(unittest.TestCase):
             self.assertIn("余白を作れ", guidance)
             self.assertIn("情報量が多すぎる", guidance)
 
+    def test_find_related_rules_surfaces_similar_rule_at_write_time(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir))
+            service.save_conversation_turn(
+                task_scope="service design",
+                user_message="業務サービスのトップを作れ",
+                assistant_message="情報を多めに並べた",
+                user_feedback="情報量が多すぎる。余白を作れ。ノリで作るな。",
+            )
+            service.save_conversation_turn(
+                task_scope="service design",
+                user_message="次のトップも作れ",
+                assistant_message="また説明を増やした",
+                user_feedback="余白を作れ。説明を削れ。",
+            )
+
+            related = service.find_related_rules(
+                ["トップ画面は余白を大きく作れ"], task_scope="service design"
+            )
+            self.assertTrue(related)
+            self.assertTrue(any("余白を作れ" in r["statement"] for r in related))
+            top = related[0]
+            self.assertIn("rule_id", top)
+            self.assertIn("status", top)
+            self.assertLessEqual(top["similarity"], 1.0)
+            self.assertLessEqual(len(related), 3)
+
+    def test_find_related_rules_empty_for_unrelated_or_blank_corrections(self):
+        with TemporaryDirectory() as temp_dir:
+            service = CorrexService(Path(temp_dir))
+            service.save_conversation_turn(
+                task_scope="service design",
+                user_message="トップを作れ",
+                assistant_message="案を出した",
+                user_feedback="余白を作れ。説明を削れ。",
+            )
+
+            self.assertEqual([], service.find_related_rules([]))
+            self.assertEqual([], service.find_related_rules(["", "  "]))
+            unrelated = service.find_related_rules(
+                ["freeeの経費申請は月次バッチで登録しろ"], task_scope="finance"
+            )
+            self.assertEqual([], unrelated)
+
     def test_local_rule_does_not_leak_into_unrelated_scope(self):
         with TemporaryDirectory() as temp_dir:
             service = CorrexService(Path(temp_dir))

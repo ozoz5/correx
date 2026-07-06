@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from .conversation_learning import extract_keywords, normalize_text
+from .rule_lifecycle import transition_status
 from .schemas import (
     ConversationTurn,
     CorrectionRecord,
@@ -1385,7 +1386,7 @@ def resolve_contradicting_rules(
             else:
                 loser, winner = rule_a, rule_b
 
-            loser.status = "demoted"
+            transition_status(loser, "demoted", "conflict: lost to higher-confidence rule")
             loser.priority = max(1, loser.priority - 2)
             if "conflict_demoted" not in loser.tags:
                 loser.tags.append("conflict_demoted")
@@ -1470,7 +1471,7 @@ def auto_correct_flagged_rules(
 
         if confidence < min_confidence_for_keep and age_days > max_revision_age_days:
             # Demote: too long flagged, low confidence
-            rule.status = "demoted"
+            transition_status(rule, "demoted", "reconsolidation: flagged too long with low confidence")
             if "self_corrected" not in rule.tags:
                 rule.tags.append("self_corrected")
             log.append({

@@ -12,11 +12,53 @@ from .mlx_trainer import MlxLoraTrainingConfig
 from .service import CorrexService
 
 SERVER_NAME = "correx"
-SERVER_INSTRUCTIONS = (
-    "Use this server when you need persistent human correction memory, "
-    "conversation-derived preference rules, training dataset export, or automatic "
-    "LoRA training orchestration for the Correx AI Correction OS."
-)
+# These instructions travel with the MCP handshake to EVERY client that
+# connects this server — they are the portable form of the rearing loop that
+# previously lived only in a per-machine CLAUDE.md. Keep them model-agnostic
+# and free of user-specific details.
+SERVER_INSTRUCTIONS = """\
+CORREX is an AI Correction OS: it turns the user's corrections into persistent,
+injectable memory (turns -> rules -> laws -> policies -> narrative). The server
+only stores, scores, and retrieves. YOU (the client LLM) are the intelligence
+layer — extraction, sublimation, and application happen in your inference, at
+zero extra API cost. Follow this loop in every session where this server is
+connected:
+
+1. PREFLIGHT — before any non-trivial task, call build_guidance_context(
+   task_title, raw_text) and follow the returned rules. Pass return_trace=true
+   when you want a measurable trace of which rules were selected.
+2. CAPTURE — the moment the user corrects, redirects, criticizes, or praises
+   you, call save_conversation_turn within that same turn.
+   extracted_corrections must be GENERALIZED reusable rules ("do not commit
+   code with failing tests"), never one-off fixes ("fixed this function").
+   Always pass reaction_score_override (0.0 strong rejection / 0.3 dissatisfied
+   / 0.5 neutral / 0.75 approval / 0.9 strong praise). When the user rejected
+   your proposal, also pass ghost_option=<the rejected output> so the rejection
+   itself becomes memory.
+3. TRACE — after meaningful research (web, files, codebase), call save_journey;
+   after completing a meaningful deliverable, call save_episode; when the
+   user's message contains a question, call save_curiosity_signal
+   (knowledge_gap / judgment_uncertainty / confirmation_seeking).
+4. MAINTAIN — when the client surfaces a pending maintenance queue (or
+   periodically), run the pipeline to completion, do not stop halfway:
+   get_unprocessed_turns -> update_turn_corrections -> process_ingested_data ->
+   get_pending_sublimations -> save_sublimation -> synthesize_meanings ->
+   synthesize_principles -> list_policies / save_policy ->
+   detect_tension_candidates -> save_tension -> semanticize_ghost_memories ->
+   scan_journey_dormancy -> cleanup_ghost_principles -> check_narrative_status
+   -> save_narrative. The run is complete only when the policy layer is
+   reached.
+5. CLOSE — after finishing a task guided by step 1, call
+   evaluate_guidance_effectiveness with per-rule scores (0.9 clearly helped ...
+   0.1 got in the way). When step 1 used return_trace=true, also call
+   record_guidance_adoption(guidance_id, adopted_rule_ids, rejected_rule_ids):
+   an explicit reject is the only way the engine learns which contexts a
+   rule does NOT belong in.
+
+Style contract: never expose internal jargon (ghost, trajectory, sublimation,
+law/doctrine) to end users — translate it into plain language. Keep tool
+payloads compact. If your runtime defers MCP tool schemas, load them via your
+tool-search mechanism before concluding CORREX is unavailable."""
 
 
 def _require_fastmcp():
@@ -1000,7 +1042,52 @@ def create_mcp_server(
             if ctx is not None and fired_principles:
                 await ctx.info(f"Ghost trajectory fired! Autonomous principle extracted: {fired_principles[0][:80]}")
 
+        # Write-time conflict surfacing: return existing rules similar to the
+        # fresh corrections so the client LLM can judge contradiction now,
+        # instead of waiting for the nightly tension batch.
+        if extracted_corrections:
+            related = service.find_related_rules(
+                extracted_corrections, task_scope=task_scope
+            )
+            if related:
+                result["related_rules"] = related
+                result["related_rules_hint"] = (
+                    "Existing rules similar to the new corrections. If one of them "
+                    "genuinely contradicts what the user just said, record the "
+                    "judgment boundary with save_tension."
+                )
+
+        # Quantum reflection: save と同時に load する設計 (save の戻り値で過去を見せる)
+        reflection = service.compute_quantum_reflection(turn)
+        if reflection:
+            result["quantum_reflection"] = reflection
+
         return result
+
+    @mcp.tool()
+    async def record_guidance_adoption(
+        guidance_id: str,
+        adopted_rule_ids: list[str] | None = None,
+        rejected_rule_ids: list[str] | None = None,
+        reason: str = "",
+        task_scope: str = "",
+    ) -> dict[str, Any]:
+        """Record which guidance rules you actually adopted vs rejected.
+
+        Call this after completing a task where build_guidance_context
+        (with return_trace=True) supplied rules. Pass the guidance_id from
+        the trace, plus the rule_ids you genuinely followed (adopted) and
+        the ones you judged irrelevant or wrong for this task (rejected).
+        An explicit reject is as valuable as an adopt: it is the only way
+        the engine learns that a rule fires in the wrong contexts.
+        """
+        return service.record_guidance_adoption(
+            guidance_id=guidance_id,
+            adopted_rule_ids=adopted_rule_ids,
+            rejected_rule_ids=rejected_rule_ids,
+            reason=reason,
+            task_scope=task_scope,
+        )
 
     @mcp.tool()
     async def save_training_example(
