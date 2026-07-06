@@ -49,15 +49,15 @@ def ngram_jaccard(a: str, b: str, n: int = 2, *, particles: bool = False) -> flo
     return len(sa & sb) / len(sa | sb)
 
 
-def ngram_overlap(a: str, b: str, n: int = 2) -> float:
+def ngram_overlap(a: str, b: str, n: int = 2, *, particles: bool = False) -> float:
     """Overlap coefficient (intersection / min).  Returns 0.0–1.0.
 
     More lenient than Jaccard — useful for detecting near-subsets.
     """
     if not a or not b:
         return 0.0
-    sa = char_ngrams(a, n)
-    sb = char_ngrams(b, n)
+    sa = char_ngrams(a, n, particles=particles)
+    sb = char_ngrams(b, n, particles=particles)
     if not sa or not sb:
         return 0.0
     return len(sa & sb) / min(len(sa), len(sb))

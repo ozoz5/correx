@@ -40,7 +40,9 @@ from .narrative_montage import (
     needs_regeneration,
     to_dict as narrative_to_dict,
 )
+from .rule_lifecycle import transition_status
 from .schemas import Meaning, Policy, Principle, Tension
+from .text_similarity import ngram_overlap
 from .curiosity_engine import (
     build_cognitive_map,
     cluster_from_dict,
@@ -336,6 +338,106 @@ class CorrexService:
 
         return turn
 
+    def find_related_rules(
+        self,
+        corrections: list[str],
+        *,
+        task_scope: str = "",
+        limit: int = 3,
+        threshold: float = 0.50,
+    ) -> list[dict]:
+        """Surface existing rules similar to fresh corrections, at write time.
+
+        The nightly batch (dream_mode / detect_tension_candidates) finds
+        contradictions hours later; returning candidates here lets the client
+        LLM judge conflict while the user is still in the conversation.
+        The server only scores similarity — conflict judgment stays client-side.
+
+        Uses the overlap coefficient (not Jaccard): a short rule statement
+        embedded in a longer correction sentence must still match.
+        """
+        texts = [c.strip() for c in (corrections or []) if c and c.strip()]
+        if not texts:
+            return []
+        scored: list[tuple[float, int, object]] = []
+        for idx, rule in enumerate(self.history.load_preference_rules()):
+            stmt = (
+                getattr(rule, "statement", "") or getattr(rule, "instruction", "") or ""
+            ).strip()
+            if not stmt:
+                continue
+            sim = max(ngram_overlap(t, stmt, n=2) for t in texts)
+            if sim < threshold:
+                continue
+            # Same-scope conflicts matter more than cross-scope echoes
+            if task_scope and getattr(rule, "applies_to_scope", "") == task_scope:
+                sim += 0.05
+            scored.append((sim, idx, rule))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            {
+                "rule_id": getattr(rule, "id", "") or "",
+                "statement": (
+                    getattr(rule, "statement", "") or getattr(rule, "instruction", "")
+                ).strip()[:80],
+                "scope": getattr(rule, "applies_to_scope", "") or "",
+                "status": getattr(rule, "status", "") or "",
+                "similarity": round(min(sim, 1.0), 3),
+            }
+            for sim, _, rule in scored[:limit]
+        ]
+
+    def record_guidance_adoption(
+        self,
+        *,
+        guidance_id: str,
+        adopted_rule_ids: list[str] | None = None,
+        rejected_rule_ids: list[str] | None = None,
+        reason: str = "",
+        task_scope: str = "",
+    ) -> dict:
+        """Record which injected rules the client LLM adopted vs rejected.
+
+        Closes the Organic Loop: build_guidance_context stamps guidance_id and
+        selected_rule_ids; this records the client's explicit adopt/reject
+        decision so injection effectiveness becomes measurable per rule.
+        (Adapted from failure-aware shared memory's adopt-or-reject step.)
+        """
+        import os
+        from datetime import datetime as _dt
+
+        adopted = [r for r in (adopted_rule_ids or []) if r and r.strip()]
+        rejected = [r for r in (rejected_rule_ids or []) if r and r.strip()]
+        record = {
+            "guidance_id": guidance_id,
+            "adopted_rule_ids": adopted,
+            "rejected_rule_ids": rejected,
+            "reason": reason[:200],
+            "task_scope": task_scope,
+            "recorded_at": _dt.now().strftime("%Y/%m/%d %H:%M:%S"),
+            "writer_pid": os.getpid(),
+        }
+        self.history.save_guidance_adoption(record)
+
+        # Compact running stats so the client sees rule-level adoption rates
+        records = self.history.load_guidance_adoptions()
+        stats: dict[str, dict[str, int]] = {}
+        for rule_id in adopted + rejected:
+            counts = {"adopted": 0, "rejected": 0}
+            for past in records:
+                if rule_id in past.get("adopted_rule_ids", []):
+                    counts["adopted"] += 1
+                if rule_id in past.get("rejected_rule_ids", []):
+                    counts["rejected"] += 1
+            stats[rule_id] = counts
+        return {
+            "ok": True,
+            "guidance_id": guidance_id,
+            "adopted": len(adopted),
+            "rejected": len(rejected),
+            "rule_stats": stats,
+        }
+
     def _awaken_dormant_rules(self, turn) -> None:
         """Wake dormant rules when anger recurs in a law-covered area.
 
@@ -363,7 +465,7 @@ class CorrexService:
             signal_words = set(w for w in signal.split() if len(w) > 2)
             overlap = len(rule_words & signal_words)
             if overlap >= 3 or scope == rule.get("applies_to_scope", ""):
-                rule["status"] = "candidate"
+                transition_status(rule, "candidate", "anger overlap awakened dormant rule")
                 rule.pop("dormant_law_index", None)
                 rule.pop("dormant_law", None)
                 awakened += 1
@@ -391,6 +493,95 @@ class CorrexService:
         )
         if awakened:
             self.history.write_ghost_trajectories(trajectories)
+
+    def compute_quantum_reflection(
+        self,
+        turn,
+        *,
+        limit: int = 3,
+        similarity_threshold: float = 0.15,
+    ) -> dict:
+        """Quantum reflection layer: save と同時に load を内包する設計.
+
+        save_conversation_turn の戻り値に類似過去・再発カウント・関連法理を
+        埋め込み、書き込みのついでに過去を見せる。Claude のような能動的に
+        過去ログを見に行かない LLM の性質を補う構造。
+
+        Args:
+            turn: 直前に保存された ConversationTurn (id を持つ).
+            limit: 返す類似ターンの最大数.
+            similarity_threshold: この閾値以上の類似度を持つターンのみ返す.
+
+        Returns:
+            dict with keys:
+              - similar_past_turns: list[{turn_id, similarity, task_scope,
+                  reaction_score, user_feedback_preview, recorded_at}]
+              - scope_recurrence_count: int (同じ task_scope の過去回数)
+              - meta_warning: str (高類似 >= 0.3 が複数あれば)
+            空のクエリの場合は {} を返す.
+        """
+        query_parts = [
+            (getattr(turn, "user_message", "") or "").strip(),
+            (getattr(turn, "user_feedback", "") or "").strip(),
+        ]
+        query = " ".join(s for s in query_parts if s)
+
+        if not query:
+            return {}
+
+        all_turns = self.history.load_conversation_turns()
+        turn_id = getattr(turn, "id", "")
+
+        # 1. 類似過去ターン (ngram_overlap top-k)
+        #    Jaccard は文長差にペナルティを課すため、短い言い換え再発
+        #    (「まだ公開保留」vs 長い元発言) を取り逃す (実測 0.121 < 0.15)。
+        #    overlap 係数 (∩/min) は同ペアで 0.267 — 再発検出にはこちら。
+        similar = []
+        for past in all_turns:
+            past_id = getattr(past, "id", "")
+            if past_id == turn_id:
+                continue
+            past_parts = [
+                (getattr(past, "user_message", "") or "").strip(),
+                (getattr(past, "user_feedback", "") or "").strip(),
+            ]
+            past_text = " ".join(s for s in past_parts if s)
+            if not past_text:
+                continue
+            score = ngram_overlap(query, past_text, n=2, particles=True)
+            if score >= similarity_threshold:
+                similar.append({
+                    "turn_id": past_id,
+                    "similarity": round(score, 3),
+                    "task_scope": (getattr(past, "task_scope", "") or "").strip(),
+                    "reaction_score": getattr(past, "reaction_score", None),
+                    "user_feedback_preview": (getattr(past, "user_feedback", "") or "")[:80],
+                    "recorded_at": getattr(past, "recorded_at", "") or "",
+                })
+        similar.sort(key=lambda x: x["similarity"], reverse=True)
+        similar = similar[:limit]
+
+        reflection: dict = {"similar_past_turns": similar}
+
+        # 2. 同じ task_scope の再発回数
+        scope = (getattr(turn, "task_scope", "") or "").strip()
+        if scope:
+            same_scope_count = sum(
+                1 for t in all_turns
+                if getattr(t, "id", "") != turn_id
+                and (getattr(t, "task_scope", "") or "").strip() == scope
+            )
+            reflection["scope_recurrence_count"] = same_scope_count
+
+        # 3. meta_warning: 高類似ターン (>=0.3) が複数あれば警告
+        high_similarity_count = sum(1 for s in similar if s["similarity"] >= 0.3)
+        if high_similarity_count >= 2:
+            reflection["meta_warning"] = (
+                f"このパターンと高類似 (>=0.3) のターンが過去 {high_similarity_count} 件存在。"
+                f"再発パターンの可能性あり。"
+            )
+
+        return reflection
 
     def save_training_example(
         self,
@@ -466,7 +657,7 @@ class CorrexService:
             changed = False
             for rule in rules:
                 if rule.id in demote_ids and rule.status == "promoted":
-                    rule.status = "candidate"
+                    transition_status(rule, "candidate", "self_overcome demotion proposal")
                     if "self_overcome_demoted" not in rule.tags:
                         rule.tags.append("self_overcome_demoted")
                     changed = True
@@ -632,7 +823,7 @@ class CorrexService:
             item
             for item in rules
             if item.get("selected_for_guidance", False)
-            and item.get("status") != "promoted"
+            and item.get("status") == "candidate"
         ][:rule_limit]
         selected_rules = promoted_rules + candidate_rules
         abstained_rules = [item for item in rules if item.get("should_abstain", False)][:rule_limit]
@@ -1074,7 +1265,7 @@ class CorrexService:
                 if rule.status != "promoted":
                     continue
                 if rule.instruction.startswith(instruction_prefix[:40]):
-                    rule.status = "demoted"
+                    transition_status(rule, "demoted", "stale_retention: failing more than succeeding")
                     if "auto_demoted" not in rule.tags:
                         rule.tags.append("auto_demoted")
                     demoted_ids.append(rule.id)
@@ -1317,7 +1508,7 @@ class CorrexService:
             # Check if covered by policies or laws
             covering = check_coverage(stmt, laws=laws, policies=policies_text)
             if covering:
-                rule["status"] = "dormant"
+                transition_status(rule, "dormant", f"absorbed by: {covering}")
                 rule["dormant_reason"] = f"absorbed by: {covering}"
                 retired += 1
 
@@ -2197,7 +2388,7 @@ class CorrexService:
             instruction = (rule.get("instruction", "") or rule.get("statement", "")).lower()
             rule_words = set(_word_pat.findall(instruction))
             if len(new_words & rule_words) >= 3:
-                rule["status"] = "dormant"
+                transition_status(rule, "dormant", "covered by new universal law")
                 rule["dormant_law"] = new_principle
                 dormanted += 1
 
@@ -2371,7 +2562,7 @@ class CorrexService:
                 if rule.get("status") == "candidate":
                     # Check if ready for promotion
                     if rule.get("success_count", 0) >= 3 and rule.get("confidence_score", 0) >= 0.6:
-                        rule["status"] = "promoted"
+                        transition_status(rule, "promoted", "evaluate: success_count>=3 and confidence>=0.6")
                         promoted += 1
             elif score < 0.3:
                 # Rule hurt — penalize
@@ -2384,7 +2575,7 @@ class CorrexService:
                 # Auto-demote if consistently failing
                 if rule.get("failure_count", 0) >= 5 and rule.get("success_count", 0) < 2:
                     if rule.get("status") in ("promoted", "candidate"):
-                        rule["status"] = "disabled"
+                        transition_status(rule, "disabled", "evaluate: failure_count>=5 with success<2")
                         demoted += 1
 
             updated += 1
